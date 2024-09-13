@@ -23,9 +23,9 @@ config = SimpleNamespace(
     noise_steps=1000,
     seed=42,
     batch_size=10,
-    img_size=32,
+    seq_size=256,
     num_classes=10,
-    dataset_path=get_cifar(img_size=32),
+    dataset_path= '/kaggle/input/' ,
     train_folder="train",
     val_folder="test",
     device="cuda:3",
@@ -41,7 +41,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=log
 
 # Define the Diffusion class
 class Diffusion:
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, img_size=256, num_classes=10, c_in=3, c_out=3, device="cuda:3", **kwargs):
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=256, num_classes=10, c_in=3, c_out=3, device="cuda:3", **kwargs):
         """
         Initializes the Diffusion class.
 
@@ -49,7 +49,7 @@ class Diffusion:
             noise_steps (int): Number of noise steps.
             beta_start (float): Starting value for beta in noise schedule.
             beta_end (float): Ending value for beta in noise schedule.
-            img_size (int): Image size.
+            seq_size (int): Sequence size.
             num_classes (int): Number of classes.
             c_in (int): Number of input channels.
             c_out (int): Number of output channels.
@@ -65,7 +65,7 @@ class Diffusion:
         self.alpha = 1. - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 
-        self.img_size = img_size
+        self.seq_size = seq_size
         self.model = UNet_conditional(c_in, c_out, num_classes=num_classes, **kwargs).to(device)
         self.ema_model = copy.deepcopy(self.model).eval().requires_grad_(False)
         self.device = device
@@ -93,12 +93,12 @@ class Diffusion:
         """
         return torch.randint(low=1, high=self.noise_steps, size=(n,))
 
-    def noise_images(self, x, t):
+    def noise_signal(self, x, t):
         """
         Adds noise to images at a specific timestep.
 
         Args:
-            x (torch.Tensor): Input images.
+            x (torch.Tensor): Input 3D signals.
             t (torch.Tensor): Timestep.
 
         Returns:
@@ -127,7 +127,7 @@ class Diffusion:
         logging.info(f"Sampling {n} new images....")
         model.eval()
         with torch.inference_mode():
-            x = torch.randn((n, self.c_in, self.img_size, self.img_size)).to(self.device)
+            x = torch.randn((n, self.c_in, self.seq_size, 1)).to(self.device)
             for i in progress_bar(reversed(range(1, self.noise_steps)), total=self.noise_steps-1, leave=False):
                 t = (torch.ones(n) * i).long().to(self.device)
                 predicted_noise = model(x, t, labels)
@@ -142,8 +142,9 @@ class Diffusion:
                 else:
                     noise = torch.zeros_like(x)
                 x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(beta) * noise
-        x = (x.clamp(-1, 1) + 1) / 2
-        x = (x * 255).type(torch.uint8)
+        #x = (x.clamp(-1, 1) + 1) / 2
+        #x = (x * 255).type(torch.uint8)
+        x = (x + 1) * 0.5
         return x
 
     def train_step(self, loss):
@@ -176,12 +177,12 @@ class Diffusion:
         else:
             self.model.eval()
         pbar = progress_bar(self.train_dataloader, leave=False)
-        for i, (images, labels) in enumerate(pbar):
+        for i, (signals, labels) in enumerate(pbar):
             with torch.autocast("cuda") and (torch.inference_mode() if not train else torch.enable_grad()):
-                images = images.to(self.device)
+                signals = signals.to(self.device)
                 labels = labels.to(self.device)
-                t = self.sample_timesteps(images.shape[0]).to(self.device)
-                x_t, noise = self.noise_images(images, t)
+                t = self.sample_timesteps(signals.shape[0]).to(self.device)
+                x_t, noise = self.noise_signals(signals, t)
                 if np.random.random() < 0.1:
                     labels = None
                 predicted_noise = self.model(x_t, t, labels)
@@ -194,18 +195,21 @@ class Diffusion:
             pbar.comment = f"MSE={loss.item():2.3f}"
         return avg_loss.mean().item()
 
-    def log_images(self):
+    def log_signals(self, save_dir="/content/drive/MyDrive/Colab Notebooks/sampled_signals"):
         """
-        Logs sampled images to WandB and saves them to disk.
+        Logs sampled signals to WandB and saves them to disk.
         """
-        labels = torch.arange(self.num_classes).long().to(self.device)
-        sampled_images = self.sample(use_ema=False, labels=labels)
-        wandb.log({"sampled_images": [wandb.Image(img.permute(1, 2, 0).squeeze().cpu().numpy()) for img in sampled_images]})
+        # Create directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
 
-        # EMA model sampling
-        ema_sampled_images = self.sample(use_ema=True, labels=labels)
-        plot_images(sampled_images)  # to display on Jupyter if available
-        wandb.log({"ema_sampled_images": [wandb.Image(img.permute(1, 2, 0).squeeze().cpu().numpy()) for img in ema_sampled_images]})
+        # Sample signals
+        labels = torch.arange(self.num_classes).long().to(self.device)
+        sampled_signals = self.sample(use_ema=False, labels=labels)
+        ema_sampled_signals = self.sample(use_ema=True, labels=labels)
+
+        # Save sampled signals
+        self.save_signals_to_drive(sampled_signals, labels, save_dir, prefix="sampled")
+        self.save_signals_to_drive(ema_sampled_signals, labels, save_dir, prefix="ema_sampled")
 
     def load(self, model_cpkt_path, model_ckpt="ckpt.pt", ema_model_ckpt="ema_ckpt.pt"):
         """
@@ -219,7 +223,7 @@ class Diffusion:
         self.model.load_state_dict(torch.load(os.path.join(model_cpkt_path, model_ckpt)))
         self.ema_model.load_state_dict(torch.load(os.path.join(model_cpkt_path, ema_model_ckpt)))
 
-    def save_model(self, run_name, epoch=-1):
+    def save_model(self, run_name, epoch=-1, save_dir="/content/drive/MyDrive/my_model"):
         """
         Saves the model locally and on WandB.
 
@@ -227,12 +231,14 @@ class Diffusion:
             run_name (str): Name of the run.
             epoch (int): Epoch number.
         """
+
+        # Ensure the directory exists
+        os.makedirs(save_dir, exist_ok=True)
+
         torch.save(self.model.state_dict(), os.path.join("models", run_name, f"ckpt.pt"))
         torch.save(self.ema_model.state_dict(), os.path.join("models", run_name, f"ema_ckpt.pt"))
         torch.save(self.optimizer.state_dict(), os.path.join("models", run_name, f"optim.pt"))
-        at = wandb.Artifact("model", type="model", description="Model weights for DDPM conditional", metadata={"epoch": epoch})
-        at.add_dir(os.path.join("models", run_name))
-        wandb.log_artifact(at)
+        print(f"Model saved to {save_dir}")
 
     def prepare(self, args):
         """
@@ -286,7 +292,7 @@ def parse_args(config):
     parser.add_argument('--epochs', type=int, default=config.epochs, help='number of epochs')
     parser.add_argument('--seed', type=int, default=config.seed, help='random seed')
     parser.add_argument('--batch_size', type=int, default=config.batch_size, help='batch size')
-    parser.add_argument('--img_size', type=int, default=config.img_size, help='image size')
+    parser.add_argument('--img_size', type=int, default=config.seq_size, help='sequence size')
     parser.add_argument('--num_classes', type=int, default=config.num_classes, help='number of classes')
     parser.add_argument('--dataset_path', type=str, default=config.dataset_path, help='path to dataset')
     parser.add_argument('--device', type=str, default=config.device, help='device')
@@ -305,7 +311,8 @@ if __name__ == '__main__':
 
     # Seed everything
     set_seed(config.seed)
-    diffuser = Diffusion(config.noise_steps, img_size=config.img_size, num_classes=config.num_classes)
-    with wandb.init(project="train_sd", group="train", config=config):
-        diffuser.prepare(config)
-        diffuser.fit(config)
+    diffuser = Diffusion(config.noise_steps, img_size=config.seq_size, num_classes=config.num_classes)
+    diffuser.prepare(config)
+    diffuser.fit(config)
+    save_dir = "/content/drive/MyDrive/Colab Notebooks/my_model"
+    diffuser.save_model(run_name="my_run", epoch=10, save_dir=save_dir)
