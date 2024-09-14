@@ -19,8 +19,7 @@ from mpl_toolkits.mplot3d import Axes3D
 
 cifar_labels = "airplane,automobile,bird,cat,deer,dog,frog,horse,ship,truck".split(",")
 alphabet_labels = "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z".split(" ")
-BASE_DIR = Path('..') / 'input' / 'data_publish_v2' / 'data_publish_v2'
-
+BASE_DIR =  Path('/content/data_publish_v2') / 'data_publish_v2'
 label_mapping = {
     'bag1': 0, 'bag2': 0, 'bag_low2': 0, 'bag_low3': 0, 'bag_normal1': 0,
     'bag_normal2': 0, 'bag_side1': 0, 'bag_speed1': 0, 'bag_speed2': 0,
@@ -93,8 +92,12 @@ def get_kaggle_dataset(dataset_path, # Local path to download dataset to
         zipped_file.unlink()
 
 def one_batch(dl):
-    return next(iter(dl))
-        
+    batch = next(iter(dl))
+    signals, labels = batch['signal'], batch['label']
+    print("type check")
+    print(type(signals))  # Should be <class 'torch.Tensor'>
+    print(type(labels))   # Should be <class 'torch.Tensor'>
+    return signals, labels
 
 def plot_images(images):
     plt.figure(figsize=(32, 32))
@@ -139,6 +142,8 @@ class MultiChannelSignalDataset(Dataset):
 
 def extract_signal_data():
     all_files_df = pd.DataFrame({'path': list(BASE_DIR.glob('*/*.txt'))})
+    print(all_files_df.shape)
+    print(all_files_df.head())
     all_files_df['exp_code'] = all_files_df['path'].map(lambda x: x.parent.stem)
     all_files_df['activity'] = all_files_df['exp_code'].map(lambda x: '_'.join(x.split('_')[1:]))
     all_files_df['person'] = all_files_df['exp_code'].map(lambda x: x.split('_')[0])
@@ -187,6 +192,7 @@ def extract_signal_data():
 
     # Convert the signals list to a numpy array with shape (num_samples, num_channels, fixed_sequence_length)
     signals_array = np.array(signals)
+    print(signals_array)
 
     # Convert the labels list to a numpy array with shape (num_samples,)
     labels_array = np.array(labels)
@@ -219,14 +225,19 @@ def get_data(args):
 
     signals, labels = extract_signal_data()
     signal_dataset = MultiChannelSignalDataset(signals=signals, labels=labels)
+    print(signal_dataset)
+    print("check 1")
+    print(signal_dataset.__getitem__)
     train_size = int(0.8 * len(signal_dataset))
     val_size = len(signal_dataset) - train_size
 
     # Split the dataset
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    train_dataset, val_dataset = random_split(signal_dataset, [train_size, val_size])
     # Create a DataLoader
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+    print(train_dataset)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    val_dataloader = DataLoader(val_dataset, batch_size=2*args.batch_size, shuffle=False, num_workers=4)
+    print(train_dataloader)
     return train_dataloader, val_dataloader
 
 

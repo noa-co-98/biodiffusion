@@ -9,26 +9,26 @@ from torch import optim
 import torch.nn as nn
 import numpy as np
 from fastprogress import progress_bar
+from IPython.display import display, HTML
 
-import wandb
 from utils import *
 from modules.modules import UNet_conditional, EMA
 
 torch.cuda.empty_cache()
 
 # Define configuration using SimpleNamespace
-config = SimpleNamespace(    
+config = SimpleNamespace(
     run_name="DDPM_conditional",
-    epochs=100,
+    epochs=1,
     noise_steps=1000,
     seed=42,
     batch_size=10,
     seq_size=256,
-    num_classes=10,
-    dataset_path= '/kaggle/input/' ,
+    num_classes=4,
+    dataset_path='/kaggle/input/',
     train_folder="train",
     val_folder="test",
-    device="cuda:3",
+    device="cuda:0",
     slice_size=1,
     do_validation=True,
     fp16=True,
@@ -39,9 +39,19 @@ config = SimpleNamespace(
 # Set up logging
 logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=logging.INFO, datefmt="%I:%M:%S")
 
+
+def is_notebook():
+    try:
+        from IPython import get_ipython
+        return get_ipython() is not None
+    except ImportError:
+        return False
+
+
 # Define the Diffusion class
 class Diffusion:
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=256, num_classes=10, c_in=3, c_out=3, device="cuda:3", **kwargs):
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=256, num_classes=10, c_in=3, c_out=3,
+                 device="cuda:0", **kwargs):
         """
         Initializes the Diffusion class.
 
@@ -128,7 +138,7 @@ class Diffusion:
         model.eval()
         with torch.inference_mode():
             x = torch.randn((n, self.c_in, self.seq_size, 1)).to(self.device)
-            for i in progress_bar(reversed(range(1, self.noise_steps)), total=self.noise_steps-1, leave=False):
+            for i in progress_bar(reversed(range(1, self.noise_steps)), total=self.noise_steps - 1, leave=False):
                 t = (torch.ones(n) * i).long().to(self.device)
                 predicted_noise = model(x, t, labels)
                 if cfg_scale > 0:
@@ -141,9 +151,11 @@ class Diffusion:
                     noise = torch.randn_like(x)
                 else:
                     noise = torch.zeros_like(x)
-                x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(beta) * noise
-        #x = (x.clamp(-1, 1) + 1) / 2
-        #x = (x * 255).type(torch.uint8)
+                x = 1 / torch.sqrt(alpha) * (
+                            x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(
+                    beta) * noise
+        # x = (x.clamp(-1, 1) + 1) / 2
+        # x = (x * 255).type(torch.uint8)
         x = (x + 1) * 0.5
         return x
 
@@ -176,13 +188,34 @@ class Diffusion:
             self.model.train()
         else:
             self.model.eval()
-        pbar = progress_bar(self.train_dataloader, leave=False)
-        for i, (signals, labels) in enumerate(pbar):
+
+        print(f"train_dataloader type in one_epoch: {type(self.train_dataloader)}")
+        print(f"val_dataloader type in one_epoch: {type(self.val_dataloader)}")
+        batch = next(iter(self.train_dataloader))
+        print(f"Batch keys: {batch.keys()}")
+        print(f"Batch 'signal' shape: {batch['signal'].shape}")
+        print(f"Batch 'label' shape: {batch['label'].shape if 'label' in batch else 'No label'}")
+        print(f"Batch 'signal' type: {type(batch['signal'])}")
+        print(f"Batch 'label' type: {type(batch['label']) if 'label' in batch else 'No label'}")
+        pbar = self.train_dataloader
+
+        for i, batch in enumerate(self.train_dataloader):
+            signals = batch['signal']
+            labels = batch['label'] if 'label' in batch else None
+            print(f"Batch {i} - Signals type: {type(signals)}, Labels type: {type(labels)}")
+            print(
+                f"Batch {i} - Signals shape: {signals.shape}, Labels shape: {labels.shape if labels is not None else 'No labels'}")
+
+            print(f"Batch {i} - Signals type: {type(signals)}, Labels type: {type(labels)}")
+            print(
+                f"Batch {i} - Signals shape: {signals.shape}, Labels shape: {labels.shape if labels is not None else 'No labels'}")
+
             with torch.autocast("cuda") and (torch.inference_mode() if not train else torch.enable_grad()):
+                print(signals)
                 signals = signals.to(self.device)
                 labels = labels.to(self.device)
                 t = self.sample_timesteps(signals.shape[0]).to(self.device)
-                x_t, noise = self.noise_signals(signals, t)
+                x_t, noise = self.noise_signal(signals, t)
                 if np.random.random() < 0.1:
                     labels = None
                 predicted_noise = self.model(x_t, t, labels)
@@ -249,9 +282,19 @@ class Diffusion:
         """
         mk_folders(args.run_name)
         self.train_dataloader, self.val_dataloader = get_data(args)
+        print(f"train_dataloader type in prepare: {type(self.train_dataloader)}")
+        print(f"val_dataloader type in prepare: {type(self.val_dataloader)}")
+        print("check")
+        batch = next(iter(self.train_dataloader))
+        print(f"Batch keys: {batch.keys()}")
+        print(f"Batch 'signal' shape: {batch['signal'].shape}")
+        print(f"Batch 'label' shape: {batch['label'].shape if 'label' in batch else 'No label'}")
+        print(f"Batch 'signal' type: {type(batch['signal'])}")
+        print(f"Batch 'label' type: {type(batch['label']) if 'label' in batch else 'No label'}")
+
         self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, eps=1e-5)
-        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=args.lr, 
-                                                 steps_per_epoch=len(self.train_dataloader), epochs=args.epochs)
+        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=args.lr,
+                                                       steps_per_epoch=len(self.train_dataloader), epochs=args.epochs)
         self.mse = nn.MSELoss()
         self.ema = EMA(0.995)
         self.scaler = torch.cuda.amp.GradScaler()
@@ -263,15 +306,17 @@ class Diffusion:
         Args:
             args: Arguments containing hyperparameters.
         """
-        for epoch in progress_bar(range(args.epochs), total=args.epochs, leave=True):
+        pbar = progress_bar(range(args.epochs), total=args.epochs, leave=True) if is_notebook() else range(args.epochs)
+        for epoch in pbar:
+
             logging.info(f"Starting epoch {epoch}:")
             _ = self.one_epoch(train=True)
-            
+
             # Validation
             if args.do_validation:
                 avg_loss = self.one_epoch(train=False)
                 wandb.log({"val_mse": avg_loss})
-            
+
             # Log predictions
             if epoch % args.log_every_epoch == 0:
                 self.log_images()
@@ -300,7 +345,7 @@ def parse_args(config):
     parser.add_argument('--slice_size', type=int, default=config.slice_size, help='slice size')
     parser.add_argument('--noise_steps', type=int, default=config.noise_steps, help='noise steps')
     args = vars(parser.parse_args())
-    
+
     # Update config with parsed args
     for k, v in args.items():
         setattr(config, k, v)
@@ -311,7 +356,7 @@ if __name__ == '__main__':
 
     # Seed everything
     set_seed(config.seed)
-    diffuser = Diffusion(config.noise_steps, img_size=config.seq_size, num_classes=config.num_classes)
+    diffuser = Diffusion(config.noise_steps, seq_size=config.seq_size, num_classes=config.num_classes)
     diffuser.prepare(config)
     diffuser.fit(config)
     save_dir = "/content/drive/MyDrive/Colab Notebooks/my_model"
