@@ -193,10 +193,15 @@ def extract_signal_data():
     # Convert the signals list to a numpy array with shape (num_samples, num_channels, fixed_sequence_length)
     signals_array = np.array(signals)
     print(signals_array)
-
+    print(signals_array.shape)
+    signals_array = np.expand_dims(signals_array, axis=-1)
+    print(signals_array)
+    print(signals_array.shape)
     # Convert the labels list to a numpy array with shape (num_samples,)
     labels_array = np.array(labels)
     labels_array = np.array([label_mapping[label] for label in labels_array])
+    print(labels_array)
+    print(labels_array.shape)
     return signals_array, labels_array
 
 
