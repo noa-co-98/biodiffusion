@@ -87,26 +87,26 @@ class SelfAttention(nn.Module):
         )
 
     def forward(self, x):
+        """Forward pass for Self - Attention adjusted for 1D signal data.
+        Input x shape: (batch, channels, width)
         """
-        Forward pass of the SelfAttention module.
+        # For 1D signals, we only have width, no height.
+        batch_size, channels, width = x.shape
 
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after self-attention.
-        """
-        size = x.shape[-1]
-        x = x.view(-1, self.channels, size * size).swapaxes(1, 2)
+        # Reshape to (batch, width, channels) for attention mechanism
+        x = x.permute(0, 2, 1)
         x_ln = self.ln(x)
         attention_value, _ = self.mha(x_ln, x_ln, x_ln)
+
+        # Apply feedforward and add residual connection
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
-        return attention_value.swapaxes(2, 1).view(-1, self.channels, size, size)
 
+        # Permute back to original shape: (batch, channels, width)
+        return attention_value.permute(0, 2, 1)
 
 class DoubleConv(nn.Module):
-    """
+"""
     DoubleConvolution module with optional residual connection.
     """
     def __init__(self, in_channels, out_channels, mid_channels=None, residual=False, conv_type="1d"):
@@ -144,6 +144,10 @@ class DoubleConv(nn.Module):
         Returns:
             - torch.Tensor: Output tensor after double convolution.
         """
+
+        if x.dim() == 4 and x.size(-1) == 1:
+            x = x.squeeze(-1)  # Remove the last dimension
+
         if self.residual:
             return F.gelu(x + self.double_conv(x))
         else:
