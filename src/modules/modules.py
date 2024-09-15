@@ -109,18 +109,30 @@ class DoubleConv(nn.Module):
     """
     DoubleConvolution module with optional residual connection.
     """
-    def __init__(self, in_channels, out_channels, mid_channels=None, residual=False):
+    def __init__(self, in_channels, out_channels, mid_channels=None, residual=False, conv_type="1d"):
         super().__init__()
         self.residual = residual
         if not mid_channels:
             mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(1, mid_channels),
-            nn.GELU(),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(1, out_channels),
-        )
+
+
+        if conv_type == "1d":
+            self.double_conv = nn.Sequential(
+                nn.Conv1d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, mid_channels),
+                nn.GELU(),
+                nn.Conv1d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, out_channels),
+            )
+        else:
+            self.double_conv = nn.Sequential(
+                nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, mid_channels),
+                nn.GELU(),
+                nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, out_channels),
+            )
+
 
     def forward(self, x):
         """
@@ -142,13 +154,20 @@ class Down(nn.Module):
     """
     Down-sampling block with max-pooling, DoubleConv blocks, and an embedding layer.
     """
-    def __init__(self, in_channels, out_channels, emb_dim=256):
+    def __init__(self, in_channels, out_channels, emb_dim=256, conv_type="1d"):
         super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, in_channels, residual=True),
-            DoubleConv(in_channels, out_channels),
-        )
+        if conv_type == "1d":
+            self.maxpool_conv = nn.Sequential(
+                nn.MaxPool1d(2),
+                DoubleConv(in_channels, in_channels, residual=True, conv_type=conv_type),
+                DoubleConv(in_channels, out_channels, conv_type=conv_type),
+            )
+        else:
+            self.maxpool_conv = nn.Sequential(
+                nn.MaxPool2d(2),
+                DoubleConv(in_channels, in_channels, residual=True, conv_type=conv_type),
+                DoubleConv(in_channels, out_channels, conv_type=conv_type),
+            )
 
         self.emb_layer = nn.Sequential(
             nn.SiLU(),
@@ -170,7 +189,13 @@ class Down(nn.Module):
             - torch.Tensor: Output tensor after down-sampling and embedding.
         """
         x = self.maxpool_conv(x)
-        emb = self.emb_layer(t)[:, :, None, None].repeat(1, 1, x.shape[-2], x.shape[-1])
+        emb = self.emb_layer(t)[:, :, None].repeat(1, 1, x.shape[-1]) if len(x.size()) == 3 else self.emb_layer(t)[:, :,
+                                                                                                 None, None].repeat(1,
+                                                                                                                    1,
+                                                                                                                    x.shape[
+                                                                                                                        -2],
+                                                                                                                    x.shape[
+                                                                                                                        -1])
         return x + emb
 
 
@@ -178,13 +203,16 @@ class Up(nn.Module):
     """
     Up-sampling block with upsampling, concatenation, DoubleConv blocks, and an embedding layer.
     """
-    def __init__(self, in_channels, out_channels, emb_dim=256):
+    def __init__(self, in_channels, out_channels, emb_dim=256, conv_type="1d"):
         super().__init__()
+        if conv_type == "1d":
+            self.up = nn.Upsample(scale_factor=2, mode="linear", align_corners=True)
+        else:
+            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
 
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
         self.conv = nn.Sequential(
-            DoubleConv(in_channels, in_channels, residual=True),
-            DoubleConv(in_channels, out_channels, in_channels // 2),
+            DoubleConv(in_channels, in_channels, residual=True, conv_type=conv_type),
+            DoubleConv(in_channels, out_channels, in_channels // 2, conv_type=conv_type),
         )
 
         self.emb_layer = nn.Sequential(
@@ -210,7 +238,7 @@ class Up(nn.Module):
         x = self.up(x)
         x = torch.cat([skip_x, x], dim=1)
         x = self.conv(x)
-        emb = self.emb_layer(t)[:, :, None, None].repeat(1, 1, x.shape[-2], x.shape[-1])
+        emb = self.emb_layer(t)[:, :, None].repeat(1, 1, x.shape[-1]) if len(x.size()) == 3 else self.emb_layer(t)[:, :, None, None].repeat(1, 1, x.shape[-2], x.shape[-1])
         return x + emb
 
 
@@ -224,29 +252,29 @@ class UNet(nn.Module):
         super().__init__()
         self.time_dim = time_dim
         self.remove_deep_conv = remove_deep_conv
-        self.inc = DoubleConv(c_in, 64)
-        self.down1 = Down(64, 128)
+        self.inc = DoubleConv(c_in, 64, conv_type="1d")
+        self.down1 = Down(64, 128, conv_type="1d")
         self.sa1 = SelfAttention(128)
-        self.down2 = Down(128, 256)
+        self.down2 = Down(128, 256, conv_type="1d")
         self.sa2 = SelfAttention(256)
-        self.down3 = Down(256, 256)
+        self.down3 = Down(256, 256, conv_type="1d")
         self.sa3 = SelfAttention(256)
         
         if remove_deep_conv:
-            self.bot1 = DoubleConv(256, 256)
-            self.bot3 = DoubleConv(256, 256)
+            self.bot1 = DoubleConv(256, 256, conv_type="1d")
+            self.bot3 = DoubleConv(256, 256, conv_type="1d")
         else:
-            self.bot1 = DoubleConv(256, 512)
-            self.bot2 = DoubleConv(512, 512)
-            self.bot3 = DoubleConv(512, 256)
+            self.bot1 = DoubleConv(256, 512, conv_type="1d")
+            self.bot2 = DoubleConv(512, 512, conv_type="1d")
+            self.bot3 = DoubleConv(512, 256, conv_type="1d")
 
-        self.up1 = Up(512, 128)
+        self.up1 = Up(512, 128, conv_type="1d")
         self.sa4 = SelfAttention(128)
-        self.up2 = Up(256, 64)
+        self.up2 = Up(256, 64, conv_type="1d")
         self.sa5 = SelfAttention(64)
-        self.up3 = Up(128, 64)
+        self.up3 = Up(128, 64, conv_type="1d")
         self.sa6 = SelfAttention(64)
-        self.outc = nn.Conv2d(64, c_out, kernel_size=1)
+        self.outc = nn.Conv1d(64, c_out, kernel_size=1)
 
     def pos_encoding(self, t, channels):
         """
