@@ -3,14 +3,14 @@ import argparse, logging, copy
 from types import SimpleNamespace
 from contextlib import nullcontext
 import os  # Add missing import statement
-
+from tqdm import tqdm
 import torch
 from torch import optim
 import torch.nn as nn
 import numpy as np
 from fastprogress import progress_bar
 from IPython.display import display, HTML
-
+import matplotlib.pyplot as plt
 from utils import *
 from modules.modules import UNet_conditional, EMA
 
@@ -138,15 +138,17 @@ class Diffusion:
         model.eval()
         with torch.inference_mode():
             x = torch.randn((n, self.c_in, self.seq_size, 1)).to(self.device)
-            for i in progress_bar(reversed(range(1, self.noise_steps)), total=self.noise_steps - 1, leave=False):
+            for i in tqdm(reversed(range(1, self.noise_steps)), total=self.noise_steps - 1, leave=False):
                 t = (torch.ones(n) * i).long().to(self.device)
                 predicted_noise = model(x, t, labels)
+
                 if cfg_scale > 0:
                     uncond_predicted_noise = model(x, t, None)
                     predicted_noise = torch.lerp(uncond_predicted_noise, predicted_noise, cfg_scale)
-                alpha = self.alpha[t][:, None, None, None]
-                alpha_hat = self.alpha_hat[t][:, None, None, None]
-                beta = self.beta[t][:, None, None, None]
+                alpha = self.alpha[t][:, None, None]  # Shape should be [channels, 1, 1]
+                alpha_hat = self.alpha_hat[t][:, None, None]  # Shape should be [channels, 1, 1]
+                beta = self.beta[t][:, None, None]  # Shape should be [channels, 1, 1]
+                predicted_noise = predicted_noise[:, :, :, None]
                 if i > 1:
                     noise = torch.randn_like(x)
                 else:
@@ -219,14 +221,77 @@ class Diffusion:
                 if np.random.random() < 0.1:
                     labels = None
                 predicted_noise = self.model(x_t, t, labels)
+                noise = noise.squeeze(-1)  # Adjust shape to match the target
+                predicted_noise = predicted_noise.squeeze(-1)  # Adjust shape to match the target
+
                 loss = self.mse(noise, predicted_noise)
                 avg_loss += loss
+
             if train:
                 self.train_step(loss)
-                wandb.log({"train_mse": loss.item(),
-                           "learning_rate": self.scheduler.get_last_lr()[0]})
+
             pbar.comment = f"MSE={loss.item():2.3f}"
         return avg_loss.mean().item()
+
+    def plot_signals(self, signals, labels, save_dir, prefix="sampled"):
+        """
+        Plots and saves the sampled 3D signals as images.
+
+        Args:
+            signals (torch.Tensor): The signals to plot.
+            labels (torch.Tensor): The labels for the signals.
+            save_dir (str): Directory to save the plot files.
+            prefix (str): Prefix for file names.
+        """
+        # Ensure save_dir exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        num_channels = signals.shape[1]  # Number of channels
+
+        # Plot each signal
+        for i, (signal, label) in enumerate(zip(signals, labels)):
+            plt.figure(figsize=(12, 4 * num_channels))
+            for ch in range(num_channels):
+                plt.subplot(num_channels, 1, ch + 1)
+                plt.plot(signal[ch].cpu().numpy().squeeze(), label=f'Channel {ch}')
+                plt.title(f'{prefix} Signal - Label {label.item()} - Channel {ch}')
+                plt.xlabel('Time')
+                plt.ylabel('Amplitude')
+                plt.legend()
+
+            # Save plot
+            file_name = f"{prefix}_label_{label.item()}.png"
+            file_path = os.path.join(save_dir, file_name)
+            plt.tight_layout()
+            plt.savefig(file_path)
+            plt.close()  # Close the figure to free up memory
+
+            print(f"Saved plot {file_path}")
+
+    def save_signals_to_drive(self, signals, labels, save_dir, prefix="sampled"):
+        """
+        Saves sampled signals to disk as .npy files.
+
+        Args:
+            signals (torch.Tensor): The signals to save.
+            labels (torch.Tensor): The labels for the signals.
+            save_dir (str): Directory to save the files.
+            prefix (str): Prefix for file names.
+        """
+        # Ensure save_dir exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Save each signal as a .npy file
+        for i, (signal, label) in enumerate(zip(signals, labels)):
+            # Convert tensor to numpy array
+            signal_np = signal.cpu().numpy()  # Convert to numpy array
+
+            # Construct file name and save
+            file_name = f"{prefix}_label_{label.item()}.npy"
+            file_path = os.path.join(save_dir, file_name)
+            np.save(file_path, signal_np)
+
+            print(f"Saved {file_path}")
 
     def log_signals(self, save_dir="/content/drive/MyDrive/Colab Notebooks/sampled_signals"):
         """
@@ -258,20 +323,22 @@ class Diffusion:
 
     def save_model(self, run_name, epoch=-1, save_dir="/content/drive/MyDrive/my_model"):
         """
-        Saves the model locally and on WandB.
+           Saves the model's state dictionary.
 
-        Args:
-            run_name (str): Name of the run.
-            epoch (int): Epoch number.
-        """
-
+           Args:
+               run_name (str): Name of the run for creating sub-directory.
+               epoch (int): Epoch number for checkpoint naming.
+               save_dir (str): Directory to save the model checkpoint.
+           """
         # Ensure the directory exists
-        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, run_name)
+        os.makedirs(save_path, exist_ok=True)
 
-        torch.save(self.model.state_dict(), os.path.join("models", run_name, f"ckpt.pt"))
-        torch.save(self.ema_model.state_dict(), os.path.join("models", run_name, f"ema_ckpt.pt"))
-        torch.save(self.optimizer.state_dict(), os.path.join("models", run_name, f"optim.pt"))
-        print(f"Model saved to {save_dir}")
+        # Save the model state dict
+        checkpoint_path = os.path.join(save_path, f"ckpt_{epoch}.pt")
+        torch.save(self.model.state_dict(), checkpoint_path)
+
+        print(f"Model saved to {checkpoint_path}")
 
     def prepare(self, args):
         """
@@ -315,11 +382,11 @@ class Diffusion:
             # Validation
             if args.do_validation:
                 avg_loss = self.one_epoch(train=False)
-                wandb.log({"val_mse": avg_loss})
+
 
             # Log predictions
             if epoch % args.log_every_epoch == 0:
-                self.log_images()
+                self.log_signals()
 
         # Save model
         self.save_model(run_name=args.run_name, epoch=epoch)
