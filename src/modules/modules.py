@@ -1,16 +1,18 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 def one_param(m):
     "Get the first parameter of the model."
     return next(iter(m.parameters()))
 
+
 class EMA:
     """
     Exponential Moving Average (EMA) for model parameters.
     """
+
     def __init__(self, beta):
         super().__init__()
         self.beta = beta
@@ -74,6 +76,7 @@ class SelfAttention(nn.Module):
     """
     Self-Attention module using Multihead Attention, Layer Normalization, and Feedforward layers.
     """
+
     def __init__(self, channels):
         super(SelfAttention, self).__init__()
         self.channels = channels
@@ -91,6 +94,7 @@ class SelfAttention(nn.Module):
         Input x shape: (batch, channels, width)
         """
         # For 1D signals, we only have width, no height.
+        print(x.shape)
         batch_size, channels, width = x.shape
 
         # Reshape to (batch, width, channels) for attention mechanism
@@ -105,16 +109,17 @@ class SelfAttention(nn.Module):
         # Permute back to original shape: (batch, channels, width)
         return attention_value.permute(0, 2, 1)
 
+
 class DoubleConv(nn.Module):
-"""
+    """
     DoubleConvolution module with optional residual connection.
     """
+
     def __init__(self, in_channels, out_channels, mid_channels=None, residual=False, conv_type="1d"):
         super().__init__()
         self.residual = residual
         if not mid_channels:
             mid_channels = out_channels
-
 
         if conv_type == "1d":
             self.double_conv = nn.Sequential(
@@ -133,7 +138,6 @@ class DoubleConv(nn.Module):
                 nn.GroupNorm(1, out_channels),
             )
 
-
     def forward(self, x):
         """
         Forward pass of the DoubleConv module.
@@ -144,10 +148,8 @@ class DoubleConv(nn.Module):
         Returns:
             - torch.Tensor: Output tensor after double convolution.
         """
-
         if x.dim() == 4 and x.size(-1) == 1:
             x = x.squeeze(-1)  # Remove the last dimension
-
         if self.residual:
             return F.gelu(x + self.double_conv(x))
         else:
@@ -158,6 +160,7 @@ class Down(nn.Module):
     """
     Down-sampling block with max-pooling, DoubleConv blocks, and an embedding layer.
     """
+
     def __init__(self, in_channels, out_channels, emb_dim=256, conv_type="1d"):
         super().__init__()
         if conv_type == "1d":
@@ -207,6 +210,7 @@ class Up(nn.Module):
     """
     Up-sampling block with upsampling, concatenation, DoubleConv blocks, and an embedding layer.
     """
+
     def __init__(self, in_channels, out_channels, emb_dim=256, conv_type="1d"):
         super().__init__()
         if conv_type == "1d":
@@ -242,7 +246,13 @@ class Up(nn.Module):
         x = self.up(x)
         x = torch.cat([skip_x, x], dim=1)
         x = self.conv(x)
-        emb = self.emb_layer(t)[:, :, None].repeat(1, 1, x.shape[-1]) if len(x.size()) == 3 else self.emb_layer(t)[:, :, None, None].repeat(1, 1, x.shape[-2], x.shape[-1])
+        emb = self.emb_layer(t)[:, :, None].repeat(1, 1, x.shape[-1]) if len(x.size()) == 3 else self.emb_layer(t)[:, :,
+                                                                                                 None, None].repeat(1,
+                                                                                                                    1,
+                                                                                                                    x.shape[
+                                                                                                                        -2],
+                                                                                                                    x.shape[
+                                                                                                                        -1])
         return x + emb
 
 
@@ -250,7 +260,6 @@ class UNet(nn.Module):
     """
     U-Net architecture with optional self-attention and conditional embedding.
     """
-   
 
     def __init__(self, c_in, c_out, time_dim=256, remove_deep_conv=False):
         super().__init__()
@@ -263,7 +272,7 @@ class UNet(nn.Module):
         self.sa2 = SelfAttention(256)
         self.down3 = Down(256, 256, conv_type="1d")
         self.sa3 = SelfAttention(256)
-        
+
         if remove_deep_conv:
             self.bot1 = DoubleConv(256, 256, conv_type="1d")
             self.bot3 = DoubleConv(256, 256, conv_type="1d")
@@ -292,8 +301,8 @@ class UNet(nn.Module):
             - torch.Tensor: Positonal encoding tensor.
         """
         inv_freq = 1.0 / (
-            10000
-            ** (torch.arange(0, channels, 2, device=one_param(self).device).float() / channels)
+                10000
+                ** (torch.arange(0, channels, 2, device=one_param(self).device).float() / channels)
         )
         pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
         pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
@@ -354,6 +363,7 @@ class UNet_conditional(UNet):
     """
     Conditional U-Net architecture with label embedding.
     """
+
     def __init__(self, c_in, c_out, time_dim=256, num_classes=None, **kwargs):
         super().__init__(c_in, c_out, time_dim, **kwargs)
         if num_classes is not None:
