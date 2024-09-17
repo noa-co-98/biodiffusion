@@ -2,15 +2,16 @@
 import argparse, logging, copy
 from types import SimpleNamespace
 from contextlib import nullcontext
+import matplotlib.pyplot as plt
 import os  # Add missing import statement
-from tqdm import tqdm
+
 import torch
 from torch import optim
 import torch.nn as nn
 import numpy as np
 from fastprogress import progress_bar
 from IPython.display import display, HTML
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 from utils import *
 from modules.modules import UNet_conditional, EMA
 
@@ -50,7 +51,7 @@ def is_notebook():
 
 # Define the Diffusion class
 class Diffusion:
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=256, num_classes=10, c_in=3, c_out=3,
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=256, num_classes=4, c_in=3, c_out=3,
                  device="cuda:0", **kwargs):
         """
         Initializes the Diffusion class.
@@ -145,20 +146,34 @@ class Diffusion:
                 if cfg_scale > 0:
                     uncond_predicted_noise = model(x, t, None)
                     predicted_noise = torch.lerp(uncond_predicted_noise, predicted_noise, cfg_scale)
-                alpha = self.alpha[t][:, None, None]  # Shape should be [channels, 1, 1]
-                alpha_hat = self.alpha_hat[t][:, None, None]  # Shape should be [channels, 1, 1]
-                beta = self.beta[t][:, None, None]  # Shape should be [channels, 1, 1]
+                alpha = self.alpha[t][:, None, None, None]  # Shape: [n, channels, 1, 1]
+                alpha_hat = self.alpha_hat[t][:, None, None, None]  # Shape: [n, channels, 1, 1]
+                beta = self.beta[t][:, None, None, None]  # Shape: [n, channels, 1, 1]
                 predicted_noise = predicted_noise[:, :, :, None]
+                # Ensure that alpha, alpha_hat, and beta are correctly reshaped
+                alpha = alpha.expand(-1, self.c_in, self.seq_size, 1)  # Adjust to [batch_size, channels, width, height]
+                alpha_hat = alpha_hat.expand(-1, self.c_in, self.seq_size, 1)
+                beta = beta.expand(-1, self.c_in, self.seq_size, 1)
+                print(f"x shape: {x.shape}")
+                print(f"alpha shape: {alpha.shape}")
+                print(f"alpha_hat shape: {alpha_hat.shape}")
+                print(f"beta shape: {beta.shape}")
+
                 if i > 1:
                     noise = torch.randn_like(x)
                 else:
                     noise = torch.zeros_like(x)
+
+                print(f"predicted_noise shape: {predicted_noise.shape}")
+                print(f"noise shape: {noise.shape}")
+
                 x = 1 / torch.sqrt(alpha) * (
-                            x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(
+                        x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(
                     beta) * noise
         # x = (x.clamp(-1, 1) + 1) / 2
         # x = (x * 255).type(torch.uint8)
         x = (x + 1) * 0.5
+        print("good")
         return x
 
     def train_step(self, loss):
@@ -218,12 +233,13 @@ class Diffusion:
                 labels = labels.to(self.device)
                 t = self.sample_timesteps(signals.shape[0]).to(self.device)
                 x_t, noise = self.noise_signal(signals, t)
+
                 if np.random.random() < 0.1:
                     labels = None
                 predicted_noise = self.model(x_t, t, labels)
+
                 noise = noise.squeeze(-1)  # Adjust shape to match the target
                 predicted_noise = predicted_noise.squeeze(-1)  # Adjust shape to match the target
-
                 loss = self.mse(noise, predicted_noise)
                 avg_loss += loss
 
@@ -232,6 +248,31 @@ class Diffusion:
 
             pbar.comment = f"MSE={loss.item():2.3f}"
         return avg_loss.mean().item()
+
+    def save_signals_to_drive(self, signals, labels, save_dir, prefix="sampled"):
+        """
+        Saves sampled signals to disk as .npy files.
+
+        Args:
+            signals (torch.Tensor): The signals to save.
+            labels (torch.Tensor): The labels for the signals.
+            save_dir (str): Directory to save the files.
+            prefix (str): Prefix for file names.
+        """
+        # Ensure save_dir exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Save each signal as a .npy file
+        for i, (signal, label) in enumerate(zip(signals, labels)):
+            # Convert tensor to numpy array
+            signal_np = signal.cpu().numpy()  # Convert to numpy array
+
+            # Construct file name and save
+            file_name = f"{prefix}_label_{label.item()}.npy"
+            file_path = os.path.join(save_dir, file_name)
+            np.save(file_path, signal_np)
+
+            print(f"Saved {file_path}")
 
     def plot_signals(self, signals, labels, save_dir, prefix="sampled"):
         """
@@ -268,31 +309,6 @@ class Diffusion:
 
             print(f"Saved plot {file_path}")
 
-    def save_signals_to_drive(self, signals, labels, save_dir, prefix="sampled"):
-        """
-        Saves sampled signals to disk as .npy files.
-
-        Args:
-            signals (torch.Tensor): The signals to save.
-            labels (torch.Tensor): The labels for the signals.
-            save_dir (str): Directory to save the files.
-            prefix (str): Prefix for file names.
-        """
-        # Ensure save_dir exists
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Save each signal as a .npy file
-        for i, (signal, label) in enumerate(zip(signals, labels)):
-            # Convert tensor to numpy array
-            signal_np = signal.cpu().numpy()  # Convert to numpy array
-
-            # Construct file name and save
-            file_name = f"{prefix}_label_{label.item()}.npy"
-            file_path = os.path.join(save_dir, file_name)
-            np.save(file_path, signal_np)
-
-            print(f"Saved {file_path}")
-
     def log_signals(self, save_dir="/content/drive/MyDrive/Colab Notebooks/sampled_signals"):
         """
         Logs sampled signals to WandB and saves them to disk.
@@ -309,6 +325,10 @@ class Diffusion:
         self.save_signals_to_drive(sampled_signals, labels, save_dir, prefix="sampled")
         self.save_signals_to_drive(ema_sampled_signals, labels, save_dir, prefix="ema_sampled")
 
+        # Plot sampled signals
+        self.plot_signals(sampled_signals, labels, save_dir, prefix="sampled")
+        self.plot_signals(ema_sampled_signals, labels, save_dir, prefix="ema_sampled")
+
     def load(self, model_cpkt_path, model_ckpt="ckpt.pt", ema_model_ckpt="ema_ckpt.pt"):
         """
         Loads model weights from checkpoint files.
@@ -323,22 +343,23 @@ class Diffusion:
 
     def save_model(self, run_name, epoch=-1, save_dir="/content/drive/MyDrive/my_model"):
         """
-           Saves the model's state dictionary.
+        Saves the model's state dictionary.
 
-           Args:
-               run_name (str): Name of the run for creating sub-directory.
-               epoch (int): Epoch number for checkpoint naming.
-               save_dir (str): Directory to save the model checkpoint.
-           """
+        Args:
+            run_name (str): Name of the run for creating sub-directory.
+            epoch (int): Epoch number for checkpoint naming.
+            save_dir (str): Directory to save the model checkpoint.
+        """
         # Ensure the directory exists
         save_path = os.path.join(save_dir, run_name)
         os.makedirs(save_path, exist_ok=True)
 
         # Save the model state dict
-        checkpoint_path = os.path.join(save_path, f"ckpt_{epoch}.pt")
-        torch.save(self.model.state_dict(), checkpoint_path)
+        torch.save(self.model.state_dict(), os.path.join(save_path, f"ckpt.pt"))
+        torch.save(self.ema_model.state_dict(), os.path.join(save_path, f"ema_ckpt.pt"))
+        torch.save(self.optimizer.state_dict(), os.path.join(save_path, f"optim.pt"))
 
-        print(f"Model saved to {checkpoint_path}")
+        # print(f"Model saved to {checkpoint_path}")
 
     def prepare(self, args):
         """
@@ -383,13 +404,35 @@ class Diffusion:
             if args.do_validation:
                 avg_loss = self.one_epoch(train=False)
 
-
             # Log predictions
             if epoch % args.log_every_epoch == 0:
                 self.log_signals()
 
         # Save model
         self.save_model(run_name=args.run_name, epoch=epoch)
+
+
+def plot_3d_signals(signals):
+    num_labels, num_dimensions, sequence_length, _ = signals.shape
+
+    for label_idx in range(num_labels):
+        fig, axes = plt.subplots(num_dimensions, 1, figsize=(10, 8), sharex=True)
+        fig.suptitle(f'Signals for label {label_idx + 1}')
+
+        # Extract the 3D signal for the current label
+        signal = signals[label_idx]  # Shape: [num_dimensions, sequence_length, 1]
+
+        # Plot each dimension
+        for dim_idx in range(num_dimensions):
+            axes[dim_idx].plot(signal[dim_idx, :, 0], label=f'Dimension {dim_idx + 1}')
+            axes[dim_idx].legend()
+            axes[dim_idx].grid(True)
+            axes[dim_idx].set_ylabel(f'Dim {dim_idx + 1}')
+
+        axes[-1].set_xlabel('Sequence Length')
+
+        plt.tight_layout()
+        plt.show()
 
 
 def parse_args(config):
