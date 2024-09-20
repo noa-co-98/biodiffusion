@@ -23,17 +23,16 @@ BASE_DIR =  Path('/content/data_publish_v2') / 'data_publish_v2'
 label_mapping = {
     'bag1': 0, 'bag2': 0, 'bag_low2': 0, 'bag_low3': 0, 'bag_normal1': 0,
     'bag_normal2': 0, 'bag_side1': 0, 'bag_speed1': 0, 'bag_speed2': 0,
-    'bag_stop1': 0, 'bag_test1': 0, 'body1': 0, 'body2': 0, 'body3': 0,
-    'body_backward1': 0, 'body_backward2': 0, 'body_backward3': 0,
-    'body_backward4': 0, 'body_fast1': 0, 'body_normal1': 0, 'body_side1': 0,
-    'body_slow1': 0, 'body_stop1': 0, 'body_test1': 0, 'handheld1': 1,
-    'handheld2': 1, 'handheld3': 1, 'handheld_normal1': 1, 'handheld_side3': 1,
-    'handheld_side4': 1, 'handheld_side_test2': 1, 'handheld_speed1': 1,
-    'handheld_speed2': 1, 'handheld_test1': 1, 'leg1': 2, 'leg2': 2,
-    'leg_front1': 2, 'leg_front2': 2, 'leg_front3': 2, 'leg_new1': 2,
-    'leg_new2': 2, 'lopata1': 3
+    'bag_stop1': 0, 'bag_test1': 0, 'body1': 1, 'body2': 1, 'body3': 1,
+    'body_backward1': 1, 'body_backward2': 1, 'body_backward3': 1,
+    'body_backward4': 1, 'body_fast1': 1, 'body_normal1': 1, 'body_side1': 1,
+    'body_slow1': 1, 'body_stop1': 1, 'body_test1': 1, 'handheld1': 2,
+    'handheld2': 2, 'handheld3': 2, 'handheld_normal1': 2, 'handheld_side3': 2,
+    'handheld_side4': 2, 'handheld_side_test2': 2, 'handheld_speed1': 2,
+    'handheld_speed2': 2, 'handheld_test1': 2, 'leg1': 3, 'leg2': 3,
+    'leg_front1': 3, 'leg_front2': 3, 'leg_front3': 3, 'leg_new1': 3,
+    'leg_new2': 3, 'lopata1': 4
 }
-
 
 def set_seed(s, reproducible=False):
     "Set random seed for `random`, `torch`, and `numpy` (where available)"
