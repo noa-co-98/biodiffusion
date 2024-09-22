@@ -16,6 +16,7 @@ from pathlib import Path
 from scipy.integrate import cumtrapz
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from sklearn.preprocessing import StandardScaler
 
 cifar_labels = "airplane,automobile,bird,cat,deer,dog,frog,horse,ship,truck".split(",")
 alphabet_labels = "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z".split(" ")
@@ -156,7 +157,7 @@ def extract_signal_data():
         dropna(axis=1)  # remove mostly empty columns
 
     # Fixed sequence length
-    fixed_sequence_length = 4*1024
+    fixed_sequence_length = 2*1024
 
     # Lists to store the accelerometer signal data and labels for all samples
     signals = []
@@ -172,7 +173,7 @@ def extract_signal_data():
         acce_data_y = acce_df['y'].values  # Acceleration 'y' data
         acce_data_z = acce_df['z'].values  # Acceleration 'z' data
 
-        # Truncate or pad sequences to the fixed length of 4*1024
+        # Truncate or pad sequences to the fixed length of 2*1024
         acce_data_x = acce_data_x[:fixed_sequence_length] if len(acce_data_x) > fixed_sequence_length else np.pad(
             acce_data_x, (0, fixed_sequence_length - len(acce_data_x)), 'constant')
         acce_data_y = acce_data_y[:fixed_sequence_length] if len(acce_data_y) > fixed_sequence_length else np.pad(
@@ -205,38 +206,21 @@ def extract_signal_data():
 
 
 def get_data(args):
-    # train_transforms = torchvision.transforms.Compose([
-    #     T.Resize(args.img_size + int(.25*args.img_size)),  # args.img_size + 1/4 *args.img_size
-    #     T.RandomResizedCrop(args.img_size, scale=(0.8, 1.0)),
-    #     T.ToTensor(),
-    #     T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    # ])
-    #
-    # val_transforms = torchvision.transforms.Compose([
-    #     T.Resize(args.img_size),
-    #     T.ToTensor(),
-    #     T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    # ])
-
-    # train_dataset = torchvision.datasets.ImageFolder(os.path.join(args.dataset_path, args.train_folder), transform=train_transforms)
-    # val_dataset = torchvision.datasets.ImageFolder(os.path.join(args.dataset_path, args.val_folder), transform=val_transforms)
-    # if args.slice_size>1:
-    #     train_dataset = torch.utils.data.Subset(train_dataset, indices=range(0, len(train_dataset), args.slice_size))
-    #     val_dataset = torch.utils.data.Subset(val_dataset, indices=range(0, len(val_dataset), args.slice_size))
-    # train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    # val_dataset = DataLoader(val_dataset, batch_size=2*args.batch_size, shuffle=False, num_workers=args.num_workers)
-    # Instantiate the dataset
 
     signals, labels = extract_signal_data()
 
     # Normalize each axis of the 3D signals independently (axis-wise normalization)
-    num_samples, num_channels, sequence_length = signals.shape
-    scaler = StandardScaler()
+    # Assuming signals have the shape (num_samples, num_channels, sequence_length, 1)
+    num_samples, num_channels, sequence_length, _ = signals.shape
+    
+    # Normalize each axis (channel) independently
+    for i in range(num_channels):
+        axis_data = signals[:, i, :, 0]  # Extract data for channel i (shape: num_samples, sequence_length)
+        mean = np.nanmean(axis_data, axis=1, keepdims=True)  # Mean per sample for the current channel
+        std = np.nanstd(axis_data, axis=1, keepdims=True)    # Std per sample for the current channel
+        signals[:, i, :, 0] = (axis_data - mean) / (std + 1e-8)  # Normalize and avoid division by zero
 
-    # Apply normalization to each channel (x, y, z) independently
-    normalized_signals = signals.copy()
-    for i in range(num_channels):  # Iterate over channels (x, y, z)
-        normalized_signals[:, i, :] = scaler.fit_transform(signals[:, i, :])
+
 
     signal_dataset = MultiChannelSignalDataset(signals=signals, labels=labels)
     #print(signal_dataset)
