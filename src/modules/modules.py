@@ -1,390 +1,473 @@
+# Import necessary libraries
+import argparse, logging, copy
+from types import SimpleNamespace
+from contextlib import nullcontext
+import matplotlib.pyplot as plt
+import os  # Add missing import statement
+
 import torch
+from torch import optim
 import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
+from fastprogress import progress_bar
+from IPython.display import display, HTML
+from tqdm import tqdm
+from utils import *
+from modules.modules import UNet_conditional, EMA
+
+torch.cuda.empty_cache()
+
+# Define configuration using SimpleNamespace
+config = SimpleNamespace(
+    run_name="DDPM_conditional",
+    epochs=100,
+    noise_steps=1000,
+    seed=42,
+    batch_size=10,
+    seq_size=4*1024,
+    num_classes=5,
+    dataset_path='/kaggle/input/',
+    train_folder="train",
+    val_folder="test",
+    device="cuda:0",
+    slice_size=1,
+    do_validation=True,
+    fp16=True,
+    log_every_epoch=10,
+    num_workers=10,
+    lr=5e-3)
+
+# Set up logging
+logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=logging.INFO, datefmt="%I:%M:%S")
 
 
-def one_param(m):
-    "Get the first parameter of the model."
-    return next(iter(m.parameters()))
+def is_notebook():
+    try:
+        from IPython import get_ipython
+        return get_ipython() is not None
+    except ImportError:
+        return False
 
 
-class EMA:
-    """
-    Exponential Moving Average (EMA) for model parameters.
-    """
-
-    def __init__(self, beta):
-        super().__init__()
-        self.beta = beta
-        self.step = 0
-
-    def update_model_average(self, ma_model, current_model):
+# Define the Diffusion class
+class Diffusion:
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=4*1024, num_classes=5, c_in=3, c_out=3,
+                 device="cuda:0", **kwargs):
         """
-        Update the model parameters with exponential moving average.
+        Initializes the Diffusion class.
 
-        Parameters:
-            - ma_model (nn.Module): Model with the moving average parameters.
-            - current_model (nn.Module): Current model with the original parameters.
+        Args:
+            noise_steps (int): Number of noise steps.
+            beta_start (float): Starting value for beta in noise schedule.
+            beta_end (float): Ending value for beta in noise schedule.
+            seq_size (int): Sequence size.
+            num_classes (int): Number of classes.
+            c_in (int): Number of input channels.
+            c_out (int): Number of output channels.
+            device (str): Device for computation.
+            **kwargs: Additional keyword arguments.
         """
-        for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
-            old_weight, up_weight = ma_params.data, current_params.data
-            ma_params.data = self.update_average(old_weight, up_weight)
+        # Initialize parameters
+        self.noise_steps = noise_steps
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        print(device)
+        self.beta = self.prepare_noise_schedule().to(device)
+        self.alpha = 1. - self.beta
+        self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 
-    def update_average(self, old, new):
+        self.seq_size = seq_size
+        self.model = UNet_conditional(c_in, c_out, num_classes=num_classes, **kwargs).to(device)
+        self.ema_model = copy.deepcopy(self.model).eval().requires_grad_(False)
+        self.device = device
+        self.c_in = c_in
+        self.num_classes = num_classes
+
+    def prepare_noise_schedule(self):
         """
-        Update the average using exponential moving average.
-
-        Parameters:
-            - old (torch.Tensor): Old average.
-            - new (torch.Tensor): New value.
+        Prepares the noise schedule using beta_start and beta_end.
 
         Returns:
-            - torch.Tensor: Updated average.
+            torch.Tensor: Noise schedule.
         """
-        if old is None:
-            return new
-        return old * self.beta + (1 - self.beta) * new
+        return torch.linspace(self.beta_start, self.beta_end, self.noise_steps)
 
-    def step_ema(self, ema_model, model, step_start_ema=2000):
+    def sample_timesteps(self, n):
         """
-        Perform a step of exponential moving average.
+        Samples random timesteps.
 
-        Parameters:
-            - ema_model (nn.Module): Model with exponential moving average.
-            - model (nn.Module): Current model.
-            - step_start_ema (int): Start EMA after this number of steps.
+        Args:
+            n (int): Number of timesteps to sample.
+
+        Returns:
+            torch.Tensor: Sampled timesteps.
         """
-        if self.step < step_start_ema:
-            self.reset_parameters(ema_model, model)
-            self.step += 1
-            return
-        self.update_model_average(ema_model, model)
-        self.step += 1
+        return torch.randint(low=1, high=self.noise_steps, size=(n,))
 
-    def reset_parameters(self, ema_model, model):
+    def noise_signal(self, x, t):
         """
-        Reset the parameters of the EMA model to match the current model.
+        Adds noise to images at a specific timestep.
 
-        Parameters:
-            - ema_model (nn.Module): Model with exponential moving average.
-            - model (nn.Module): Current model.
+        Args:
+            x (torch.Tensor): Input 3D signals.
+            t (torch.Tensor): Timestep.
+
+        Returns:
+            tuple: Tuple containing noisy images and noise.
         """
-        ema_model.load_state_dict(model.state_dict())
+        sqrt_alpha_hat = torch.sqrt(self.alpha_hat[t])[:, None, None, None]
+        sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alpha_hat[t])[:, None, None, None]
+        Ɛ = torch.randn_like(x)
+        return sqrt_alpha_hat * x + sqrt_one_minus_alpha_hat * Ɛ, Ɛ
 
-
-class SelfAttention(nn.Module):
-    """
-    Self-Attention module using Multihead Attention, Layer Normalization, and Feedforward layers.
-    """
-
-    def __init__(self, channels):
-        super(SelfAttention, self).__init__()
-        self.channels = channels
-        self.mha = nn.MultiheadAttention(channels, 4, batch_first=True)
-        self.ln = nn.LayerNorm([channels])
-        self.ff_self = nn.Sequential(
-            nn.LayerNorm([channels]),
-            nn.Linear(channels, channels),
-            nn.GELU(),
-            nn.Linear(channels, channels),
-        )
-
-    def forward(self, x):
-        """Forward pass for Self - Attention adjusted for 1D signal data.
-        Input x shape: (batch, channels, width)
+    @torch.inference_mode()
+    def sample(self, use_ema, labels, cfg_scale=3):
         """
-        # For 1D signals, we only have width, no height.
-        print(x.shape)
-        batch_size, channels, width = x.shape
+        Generates samples using the diffusion model.
 
-        # Reshape to (batch, width, channels) for attention mechanism
-        x = x.permute(0, 2, 1)
-        x_ln = self.ln(x)
-        attention_value, _ = self.mha(x_ln, x_ln, x_ln)
+        Args:
+            use_ema (bool): Whether to use the EMA model.
+            labels (torch.Tensor): Labels for conditional sampling.
+            cfg_scale (int): Configuration scale.
 
-        # Apply feedforward and add residual connection
-        attention_value = attention_value + x
-        attention_value = self.ff_self(attention_value) + attention_value
+        Returns:
+            torch.Tensor: Generated samples.
+        """
+        model = self.ema_model if use_ema else self.model
+        n = len(labels)
+        logging.info(f"Sampling {n} new images....")
+        model.eval()
+        with torch.inference_mode():
+            x = torch.randn((n, self.c_in, self.seq_size, 1)).to(self.device)
+            for i in tqdm(reversed(range(1, self.noise_steps)), total=self.noise_steps - 1, leave=False):
+                t = (torch.ones(n) * i).long().to(self.device)
+                predicted_noise = model(x, t, labels)
 
-        # Permute back to original shape: (batch, channels, width)
-        return attention_value.permute(0, 2, 1)
+                if cfg_scale > 0:
+                    uncond_predicted_noise = model(x, t, None)
+                    predicted_noise = torch.lerp(uncond_predicted_noise, predicted_noise, cfg_scale)
+                alpha = self.alpha[t][:, None, None, None]  # Shape: [n, channels, 1, 1]
+                alpha_hat = self.alpha_hat[t][:, None, None, None]  # Shape: [n, channels, 1, 1]
+                beta = self.beta[t][:, None, None, None]  # Shape: [n, channels, 1, 1]
+                predicted_noise = predicted_noise[:, :, :, None]
+                # Ensure that alpha, alpha_hat, and beta are correctly reshaped
+                alpha = alpha.expand(-1, self.c_in, self.seq_size, 1)  # Adjust to [batch_size, channels, width, height]
+                alpha_hat = alpha_hat.expand(-1, self.c_in, self.seq_size, 1)
+                beta = beta.expand(-1, self.c_in, self.seq_size, 1)
+                print(f"x shape: {x.shape}")
+                print(f"alpha shape: {alpha.shape}")
+                print(f"alpha_hat shape: {alpha_hat.shape}")
+                print(f"beta shape: {beta.shape}")
 
+                if i > 1:
+                    noise = torch.randn_like(x)
+                else:
+                    noise = torch.zeros_like(x)
 
-class DoubleConv(nn.Module):
-    """
-    DoubleConvolution module with optional residual connection.
-    """
+                print(f"predicted_noise shape: {predicted_noise.shape}")
+                print(f"noise shape: {noise.shape}")
 
-    def __init__(self, in_channels, out_channels, mid_channels=None, residual=False, conv_type="1d"):
-        super().__init__()
-        self.residual = residual
-        if not mid_channels:
-            mid_channels = out_channels
+                x = 1 / torch.sqrt(alpha) * (
+                        x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(
+                    beta) * noise
+        # x = (x.clamp(-1, 1) + 1) / 2
+        # x = (x * 255).type(torch.uint8)
+        x = (x + 1) * 0.5
+        print("good")
+        return x
 
-        if conv_type == "1d":
-            self.double_conv = nn.Sequential(
-                nn.Conv1d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-                nn.GroupNorm(1, mid_channels),
-                nn.GELU(),
-                nn.Conv1d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-                nn.GroupNorm(1, out_channels),
-            )
+    def train_step(self, loss):
+        """
+        Performs a training step.
+
+        Args:
+            loss (torch.Tensor): Loss value.
+        """
+        self.optimizer.zero_grad()
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.ema.step_ema(self.ema_model, self.model)
+        self.scheduler.step()
+
+    def one_epoch(self, train=True):
+        """
+        Performs one epoch of training or validation.
+
+        Args:
+            train (bool): Whether to perform training.
+
+        Returns:
+            float: Average loss for the epoch.
+        """
+        avg_loss = 0.
+        if train:
+            self.model.train()
         else:
-            self.double_conv = nn.Sequential(
-                nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-                nn.GroupNorm(1, mid_channels),
-                nn.GELU(),
-                nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-                nn.GroupNorm(1, out_channels),
-            )
+            self.model.eval()
 
-    def forward(self, x):
+        print(f"train_dataloader type in one_epoch: {type(self.train_dataloader)}")
+        print(f"val_dataloader type in one_epoch: {type(self.val_dataloader)}")
+        batch = next(iter(self.train_dataloader))
+        print(f"Batch keys: {batch.keys()}")
+        print(f"Batch 'signal' shape: {batch['signal'].shape}")
+        print(f"Batch 'label' shape: {batch['label'].shape if 'label' in batch else 'No label'}")
+        print(f"Batch 'signal' type: {type(batch['signal'])}")
+        print(f"Batch 'label' type: {type(batch['label']) if 'label' in batch else 'No label'}")
+        pbar = self.train_dataloader
+
+        for i, batch in enumerate(self.train_dataloader):
+            signals = batch['signal']
+            labels = batch['label'] if 'label' in batch else None
+            print(f"Batch {i} - Signals type: {type(signals)}, Labels type: {type(labels)}")
+            print(
+                f"Batch {i} - Signals shape: {signals.shape}, Labels shape: {labels.shape if labels is not None else 'No labels'}")
+
+            print(f"Batch {i} - Signals type: {type(signals)}, Labels type: {type(labels)}")
+            print(
+                f"Batch {i} - Signals shape: {signals.shape}, Labels shape: {labels.shape if labels is not None else 'No labels'}")
+
+            with torch.autocast("cuda") and (torch.inference_mode() if not train else torch.enable_grad()):
+                print(signals)
+                signals = signals.to(self.device)
+                labels = labels.to(self.device)
+                t = self.sample_timesteps(signals.shape[0]).to(self.device)
+                x_t, noise = self.noise_signal(signals, t)
+
+                if np.random.random() < 0.1:
+                    labels = None
+                predicted_noise = self.model(x_t, t, labels)
+
+                noise = noise.squeeze(-1)  # Adjust shape to match the target
+                predicted_noise = predicted_noise.squeeze(-1)  # Adjust shape to match the target
+                loss = self.mse(noise, predicted_noise)
+                avg_loss += loss
+
+            if train:
+                self.train_step(loss)
+
+            pbar.comment = f"MSE={loss.item():2.3f}"
+        return avg_loss.mean().item()
+
+    def save_signals_to_drive(self, signals, labels, save_dir, prefix="sampled"):
         """
-        Forward pass of the DoubleConv module.
+        Saves sampled signals to disk as .npy files.
 
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after double convolution.
+        Args:
+            signals (torch.Tensor): The signals to save.
+            labels (torch.Tensor): The labels for the signals.
+            save_dir (str): Directory to save the files.
+            prefix (str): Prefix for file names.
         """
-        if x.dim() == 4 and x.size(-1) == 1:
-            x = x.squeeze(-1)  # Remove the last dimension
-        if self.residual:
-            return F.gelu(x + self.double_conv(x))
-        else:
-            return self.double_conv(x)
+        # Ensure save_dir exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Save each signal as a .npy file
+        for i, (signal, label) in enumerate(zip(signals, labels)):
+            # Convert tensor to numpy array
+            signal_np = signal.cpu().numpy()  # Convert to numpy array
+
+            # Construct file name and save
+            file_name = f"{prefix}_label_{label.item()}.npy"
+            file_path = os.path.join(save_dir, file_name)
+            np.save(file_path, signal_np)
+
+            print(f"Saved {file_path}")
+
+    def plot_signals(self, signals, labels, save_dir, prefix="sampled"):
+        """
+        Plots and saves the sampled 3D signals as images.
+
+        Args:
+            signals (torch.Tensor): The signals to plot.
+            labels (torch.Tensor): The labels for the signals.
+            save_dir (str): Directory to save the plot files.
+            prefix (str): Prefix for file names.
+        """
+        # Ensure save_dir exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        num_channels = signals.shape[1]  # Number of channels
+
+        # Plot each signal
+        for i, (signal, label) in enumerate(zip(signals, labels)):
+            plt.figure(figsize=(12, 4 * num_channels))
+            for ch in range(num_channels):
+                plt.subplot(num_channels, 1, ch + 1)
+                plt.plot(signal[ch].cpu().numpy().squeeze(), label=f'Channel {ch}')
+                plt.title(f'{prefix} Signal - Label {label.item()} - Channel {ch}')
+                plt.xlabel('Time')
+                plt.ylabel('Amplitude')
+                plt.legend()
+
+            # Save plot
+            file_name = f"{prefix}_label_{label.item()}.png"
+            file_path = os.path.join(save_dir, file_name)
+            plt.tight_layout()
+            plt.savefig(file_path)
+            plt.close()  # Close the figure to free up memory
+
+            print(f"Saved plot {file_path}")
+
+    def log_signals(self, save_dir="/content/drive/MyDrive/Colab Notebooks/sampled_signals"):
+        """
+        Logs sampled signals to WandB and saves them to disk.
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Sample signals
+        labels = torch.arange(self.num_classes).long().to(self.device)
+        sampled_signals = self.sample(use_ema=False, labels=labels)
+        ema_sampled_signals = self.sample(use_ema=True, labels=labels)
+
+        # Save sampled signals
+        self.save_signals_to_drive(sampled_signals, labels, save_dir, prefix="sampled")
+        self.save_signals_to_drive(ema_sampled_signals, labels, save_dir, prefix="ema_sampled")
+
+        # Plot sampled signals
+        self.plot_signals(sampled_signals, labels, save_dir, prefix="sampled")
+        self.plot_signals(ema_sampled_signals, labels, save_dir, prefix="ema_sampled")
+
+    def load(self, model_cpkt_path, model_ckpt="ckpt.pt", ema_model_ckpt="ema_ckpt.pt"):
+        """
+        Loads model weights from checkpoint files.
+
+        Args:
+            model_cpkt_path (str): Path to the model checkpoint.
+            model_ckpt (str): Model checkpoint filename.
+            ema_model_ckpt (str): EMA model checkpoint filename.
+        """
+        self.model.load_state_dict(torch.load(os.path.join(model_cpkt_path, model_ckpt)))
+        self.ema_model.load_state_dict(torch.load(os.path.join(model_cpkt_path, ema_model_ckpt)))
+
+    def save_model(self, run_name, epoch=-1, save_dir="/content/drive/MyDrive/my_model"):
+        """
+        Saves the model's state dictionary.
+
+        Args:
+            run_name (str): Name of the run for creating sub-directory.
+            epoch (int): Epoch number for checkpoint naming.
+            save_dir (str): Directory to save the model checkpoint.
+        """
+        # Ensure the directory exists
+        save_path = os.path.join(save_dir, run_name)
+        os.makedirs(save_path, exist_ok=True)
+
+        # Save the model state dict
+        torch.save(self.model.state_dict(), os.path.join(save_path, f"ckpt.pt"))
+        torch.save(self.ema_model.state_dict(), os.path.join(save_path, f"ema_ckpt.pt"))
+        torch.save(self.optimizer.state_dict(), os.path.join(save_path, f"optim.pt"))
+
+        # print(f"Model saved to {checkpoint_path}")
+
+    def prepare(self, args):
+        """
+        Prepares the data, optimizer, scheduler, loss function, and other components for training.
+
+        Args:
+            args: Arguments containing hyperparameters.
+        """
+        mk_folders(args.run_name)
+        self.train_dataloader, self.val_dataloader = get_data(args)
+        print(f"train_dataloader type in prepare: {type(self.train_dataloader)}")
+        print(f"val_dataloader type in prepare: {type(self.val_dataloader)}")
+        print("check")
+        batch = next(iter(self.train_dataloader))
+        print(f"Batch keys: {batch.keys()}")
+        print(f"Batch 'signal' shape: {batch['signal'].shape}")
+        print(f"Batch 'label' shape: {batch['label'].shape if 'label' in batch else 'No label'}")
+        print(f"Batch 'signal' type: {type(batch['signal'])}")
+        print(f"Batch 'label' type: {type(batch['label']) if 'label' in batch else 'No label'}")
+
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=args.lr, eps=1e-5)
+        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=args.lr,
+                                                       steps_per_epoch=len(self.train_dataloader), epochs=args.epochs)
+        self.mse = nn.MSELoss()
+        self.ema = EMA(0.995)
+        self.scaler = torch.cuda.amp.GradScaler()
+
+    def fit(self, args):
+        """
+        Trains the model for the specified number of epochs.
+
+        Args:
+            args: Arguments containing hyperparameters.
+        """
+        pbar = progress_bar(range(args.epochs), total=args.epochs, leave=True) if is_notebook() else range(args.epochs)
+        for epoch in pbar:
+
+            logging.info(f"Starting epoch {epoch}:")
+            _ = self.one_epoch(train=True)
+
+            # Validation
+            if args.do_validation:
+                avg_loss = self.one_epoch(train=False)
+
+            # Log predictions
+            if epoch % args.log_every_epoch == 0:
+                self.log_signals()
+
+        # Save model
+        self.save_model(run_name=args.run_name, epoch=epoch)
 
 
-class Down(nn.Module):
+def plot_3d_signals(signals):
+    num_labels, num_dimensions, sequence_length, _ = signals.shape
+
+    for label_idx in range(num_labels):
+        fig, axes = plt.subplots(num_dimensions, 1, figsize=(10, 8), sharex=True)
+        fig.suptitle(f'Signals for label {label_idx + 1}')
+
+        # Extract the 3D signal for the current label
+        signal = signals[label_idx]  # Shape: [num_dimensions, sequence_length, 1]
+
+        # Plot each dimension
+        for dim_idx in range(num_dimensions):
+            axes[dim_idx].plot(signal[dim_idx, :, 0], label=f'Dimension {dim_idx + 1}')
+            axes[dim_idx].legend()
+            axes[dim_idx].grid(True)
+            axes[dim_idx].set_ylabel(f'Dim {dim_idx + 1}')
+
+        axes[-1].set_xlabel('Sequence Length')
+
+        plt.tight_layout()
+        plt.show()
+
+
+def parse_args(config):
     """
-    Down-sampling block with max-pooling, DoubleConv blocks, and an embedding layer.
+    Parses command line arguments and updates the configuration.
+
+    Args:
+        config: Configuration object.
     """
+    parser = argparse.ArgumentParser(description='Process hyper-parameters')
+    parser.add_argument('--run_name', type=str, default=config.run_name, help='name of the run')
+    parser.add_argument('--epochs', type=int, default=config.epochs, help='number of epochs')
+    parser.add_argument('--seed', type=int, default=config.seed, help='random seed')
+    parser.add_argument('--batch_size', type=int, default=config.batch_size, help='batch size')
+    parser.add_argument('--img_size', type=int, default=config.seq_size, help='sequence size')
+    parser.add_argument('--num_classes', type=int, default=config.num_classes, help='number of classes')
+    parser.add_argument('--dataset_path', type=str, default=config.dataset_path, help='path to dataset')
+    parser.add_argument('--device', type=str, default=config.device, help='device')
+    parser.add_argument('--lr', type=float, default=config.lr, help='learning rate')
+    parser.add_argument('--slice_size', type=int, default=config.slice_size, help='slice size')
+    parser.add_argument('--noise_steps', type=int, default=config.noise_steps, help='noise steps')
+    args = vars(parser.parse_args())
 
-    def __init__(self, in_channels, out_channels, emb_dim=256, conv_type="1d"):
-        super().__init__()
-        if conv_type == "1d":
-            self.maxpool_conv = nn.Sequential(
-                nn.MaxPool1d(2),
-                DoubleConv(in_channels, in_channels, residual=True, conv_type=conv_type),
-                DoubleConv(in_channels, out_channels, conv_type=conv_type),
-            )
-        else:
-            self.maxpool_conv = nn.Sequential(
-                nn.MaxPool2d(2),
-                DoubleConv(in_channels, in_channels, residual=True, conv_type=conv_type),
-                DoubleConv(in_channels, out_channels, conv_type=conv_type),
-            )
-
-        self.emb_layer = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(
-                emb_dim,
-                out_channels
-            ),
-        )
-
-    def forward(self, x, t):
-        """
-        Forward pass of the Down-sampling block.
-
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-            - t (torch.Tensor): Time information tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after down-sampling and embedding.
-        """
-        x = self.maxpool_conv(x)
-        emb = self.emb_layer(t)[:, :, None].repeat(1, 1, x.shape[-1]) if len(x.size()) == 3 else self.emb_layer(t)[:, :,
-                                                                                                 None, None].repeat(1,
-                                                                                                                    1,
-                                                                                                                    x.shape[
-                                                                                                                        -2],
-                                                                                                                    x.shape[
-                                                                                                                        -1])
-        return x + emb
+    # Update config with parsed args
+    for k, v in args.items():
+        setattr(config, k, v)
 
 
-class Up(nn.Module):
-    """
-    Up-sampling block with upsampling, concatenation, DoubleConv blocks, and an embedding layer.
-    """
+if __name__ == '__main__':
+    parse_args(config)
 
-    def __init__(self, in_channels, out_channels, emb_dim=256, conv_type="1d"):
-        super().__init__()
-        if conv_type == "1d":
-            self.up = nn.Upsample(scale_factor=2, mode="linear", align_corners=True)
-        else:
-            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-
-        self.conv = nn.Sequential(
-            DoubleConv(in_channels, in_channels, residual=True, conv_type=conv_type),
-            DoubleConv(in_channels, out_channels, in_channels // 2, conv_type=conv_type),
-        )
-
-        self.emb_layer = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(
-                emb_dim,
-                out_channels
-            ),
-        )
-
-    def forward(self, x, skip_x, t):
-        """
-        Forward pass of the Up-sampling block.
-
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-            - skip_x (torch.Tensor): Skip connection tensor.
-            - t (torch.Tensor): Time information tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after up-sampling and embedding.
-        """
-        x = self.up(x)
-        x = torch.cat([skip_x, x], dim=1)
-        x = self.conv(x)
-        emb = self.emb_layer(t)[:, :, None].repeat(1, 1, x.shape[-1]) if len(x.size()) == 3 else self.emb_layer(t)[:, :,
-                                                                                                 None, None].repeat(1,
-                                                                                                                    1,
-                                                                                                                    x.shape[
-                                                                                                                        -2],
-                                                                                                                    x.shape[
-                                                                                                                        -1])
-        return x + emb
-
-
-class UNet(nn.Module):
-    """
-    U-Net architecture with optional self-attention and conditional embedding.
-    """
-
-    def __init__(self, c_in, c_out, time_dim=256, remove_deep_conv=False):
-        super().__init__()
-        self.time_dim = time_dim
-        self.remove_deep_conv = remove_deep_conv
-        self.inc = DoubleConv(c_in, 64, conv_type="1d")
-        self.down1 = Down(64, 128, conv_type="1d")
-        self.sa1 = SelfAttention(128)
-        self.down2 = Down(128, 256, conv_type="1d")
-        self.sa2 = SelfAttention(256)
-        self.down3 = Down(256, 256, conv_type="1d")
-        self.sa3 = SelfAttention(256)
-
-        if remove_deep_conv:
-            self.bot1 = DoubleConv(256, 256, conv_type="1d")
-            self.bot3 = DoubleConv(256, 256, conv_type="1d")
-        else:
-            self.bot1 = DoubleConv(256, 512, conv_type="1d")
-            self.bot2 = DoubleConv(512, 512, conv_type="1d")
-            self.bot3 = DoubleConv(512, 256, conv_type="1d")
-
-        self.up1 = Up(512, 128, conv_type="1d")
-        self.sa4 = SelfAttention(128)
-        self.up2 = Up(256, 64, conv_type="1d")
-        self.sa5 = SelfAttention(64)
-        self.up3 = Up(128, 64, conv_type="1d")
-        self.sa6 = SelfAttention(64)
-        self.outc = nn.Conv1d(64, c_out, kernel_size=1)
-
-    def pos_encoding(self, t, channels):
-        """
-        Generate positional encoding based on time information.
-
-        Parameters:
-            - t (torch.Tensor): Time information tensor.
-            - channels (int): Number of channels.
-
-        Returns:
-            - torch.Tensor: Positonal encoding tensor.
-        """
-        inv_freq = 1.0 / (
-                10000
-                ** (torch.arange(0, channels, 2, device=one_param(self).device).float() / channels)
-        )
-        pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
-        pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
-        pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
-        return pos_enc
-
-    def unet_forwad(self, x, t):
-        """
-        Forward pass of the U-Net architecture.
-
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-            - t (torch.Tensor): Time information tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after U-Net processing.
-        """
-        x1 = self.inc(x)
-        x2 = self.down1(x1, t)
-        x2 = self.sa1(x2)
-        x3 = self.down2(x2, t)
-        x3 = self.sa2(x3)
-        x4 = self.down3(x3, t)
-        x4 = self.sa3(x4)
-
-        x4 = self.bot1(x4)
-        if not self.remove_deep_conv:
-            x4 = self.bot2(x4)
-
-        x4 = self.bot3(x4)
-
-        x = self.up1(x4, x3, t)
-        x = self.sa4(x)
-        x = self.up2(x, x2, t)
-        x = self.sa5(x)
-        x = self.up3(x, x1, t)
-        x = self.sa6(x)
-        output = self.outc(x)
-        return output
-
-    def forward(self, x, t):
-        """
-        Forward pass of the U-Net architecture with positional encoding.
-
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-            - t (torch.Tensor): Time information tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after U-Net processing.
-        """
-        t = t.unsqueeze(-1)
-        t = self.pos_encoding(t, self.time_dim)
-        return self.unet_forwad(x, t)
-
-
-class UNet_conditional(UNet):
-    """
-    Conditional U-Net architecture with label embedding.
-    """
-
-    def __init__(self, c_in, c_out, time_dim=256, num_classes=None, **kwargs):
-        super().__init__(c_in, c_out, time_dim, **kwargs)
-        if num_classes is not None:
-            self.label_emb = nn.Embedding(num_classes, time_dim)
-
-    def forward(self, x, t, y=None):
-        """
-        Forward pass of the conditional U-Net architecture.
-
-        Parameters:
-            - x (torch.Tensor): Input tensor.
-            - t (torch.Tensor): Time information tensor.
-            - y (torch.Tensor): Class label tensor.
-
-        Returns:
-            - torch.Tensor: Output tensor after conditional U-Net processing.
-        """
-        t = t.unsqueeze(-1)
-        t = self.pos_encoding(t, self.time_dim)
-
-        if y is not None:
-            t += self.label_emb(y)
-
-        return self.unet_forwad(x, t)
+    # Seed everything
+    set_seed(config.seed)
+    diffuser = Diffusion(config.noise_steps, seq_size=config.seq_size, num_classes=config.num_classes)
+    diffuser.prepare(config)
+    diffuser.fit(config)
+    save_dir = "/content/drive/MyDrive/Colab Notebooks/my_model"
+    diffuser.save_model(run_name="my_run", epoch=10, save_dir=save_dir)
