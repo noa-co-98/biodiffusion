@@ -156,7 +156,7 @@ def extract_signal_data():
         dropna(axis=1)  # remove mostly empty columns
 
     # Fixed sequence length
-    fixed_sequence_length = 256
+    fixed_sequence_length = 4*1024
 
     # Lists to store the accelerometer signal data and labels for all samples
     signals = []
@@ -172,7 +172,7 @@ def extract_signal_data():
         acce_data_y = acce_df['y'].values  # Acceleration 'y' data
         acce_data_z = acce_df['z'].values  # Acceleration 'z' data
 
-        # Truncate or pad sequences to the fixed length of 256
+        # Truncate or pad sequences to the fixed length of 4*1024
         acce_data_x = acce_data_x[:fixed_sequence_length] if len(acce_data_x) > fixed_sequence_length else np.pad(
             acce_data_x, (0, fixed_sequence_length - len(acce_data_x)), 'constant')
         acce_data_y = acce_data_y[:fixed_sequence_length] if len(acce_data_y) > fixed_sequence_length else np.pad(
@@ -228,10 +228,20 @@ def get_data(args):
     # Instantiate the dataset
 
     signals, labels = extract_signal_data()
+
+    # Normalize each axis of the 3D signals independently (axis-wise normalization)
+    num_samples, num_channels, sequence_length = signals.shape
+    scaler = StandardScaler()
+
+    # Apply normalization to each channel (x, y, z) independently
+    normalized_signals = signals.copy()
+    for i in range(num_channels):  # Iterate over channels (x, y, z)
+        normalized_signals[:, i, :] = scaler.fit_transform(signals[:, i, :])
+
     signal_dataset = MultiChannelSignalDataset(signals=signals, labels=labels)
-    print(signal_dataset)
-    print("check 1")
-    print(signal_dataset.__getitem__)
+    #print(signal_dataset)
+    #print("check 1")
+    #print(signal_dataset.__getitem__)
     train_size = int(0.8 * len(signal_dataset))
     val_size = len(signal_dataset) - train_size
 

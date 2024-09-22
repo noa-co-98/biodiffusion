@@ -20,11 +20,11 @@ torch.cuda.empty_cache()
 # Define configuration using SimpleNamespace
 config = SimpleNamespace(
     run_name="DDPM_conditional",
-    epochs=300,
+    epochs=100,
     noise_steps=1000,
     seed=42,
     batch_size=10,
-    seq_size=256,
+    seq_size=4*1024,
     num_classes=5,
     dataset_path='/kaggle/input/',
     train_folder="train",
@@ -51,7 +51,7 @@ def is_notebook():
 
 # Define the Diffusion class
 class Diffusion:
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=256, num_classes=5, c_in=3, c_out=3,
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=4*1024, num_classes=5, c_in=3, c_out=3,
                  device="cuda:0", **kwargs):
         """
         Initializes the Diffusion class.
