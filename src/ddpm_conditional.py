@@ -24,7 +24,7 @@ config = SimpleNamespace(
     noise_steps=1000,
     seed=42,
     batch_size=10,
-    seq_size=4*1024,
+    seq_size=2*1024,
     num_classes=5,
     dataset_path='/kaggle/input/',
     train_folder="train",
@@ -51,7 +51,7 @@ def is_notebook():
 
 # Define the Diffusion class
 class Diffusion:
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=4*1024, num_classes=5, c_in=3, c_out=3,
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, seq_size=2*1024, num_classes=5, c_in=3, c_out=3,
                  device="cuda:0", **kwargs):
         """
         Initializes the Diffusion class.
@@ -133,6 +133,8 @@ class Diffusion:
         Returns:
             torch.Tensor: Generated samples.
         """
+        means = np.array([-0.07471468,  9.2097996,   1.67035854])
+        stds = np.array([1.04284218, 1.61164589, 3.29274985])
         model = self.ema_model if use_ema else self.model
         n = len(labels)
         logging.info(f"Sampling {n} new images....")
@@ -170,6 +172,10 @@ class Diffusion:
                 x = 1 / torch.sqrt(alpha) * (
                         x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(
                     beta) * noise
+        
+        means_tensor = torch.tensor(means).to(self.device).view(1, self.c_in, 1, 1)  # Reshape for broadcasting
+        stds_tensor = torch.tensor(stds).to(self.device).view(1, self.c_in, 1, 1)    # Reshape for broadcasting
+        x = x * stds_tensor + means_tensor  # Denormalize
         # x = (x.clamp(-1, 1) + 1) / 2
         # x = (x * 255).type(torch.uint8)
         x = (x + 1) * 0.5

@@ -213,12 +213,22 @@ def get_data(args):
     # Assuming signals have the shape (num_samples, num_channels, sequence_length, 1)
     num_samples, num_channels, sequence_length, _ = signals.shape
     
+    means = np.zeros(num_channels)
+    stds = np.zeros(num_channels)
     # Normalize each axis (channel) independently
     for i in range(num_channels):
         axis_data = signals[:, i, :, 0]  # Extract data for channel i (shape: num_samples, sequence_length)
-        mean = np.nanmean(axis_data, axis=1, keepdims=True)  # Mean per sample for the current channel
-        std = np.nanstd(axis_data, axis=1, keepdims=True)    # Std per sample for the current channel
+        # mean = np.nanmean(axis_data, axis=1, keepdims=True)  # Mean per sample for the current channel
+        # std = np.nanstd(axis_data, axis=1, keepdims=True)    # Std per sample for the current channel
+        mean = np.nanmean(axis_data)  # Mean for the current channel
+        std = np.nanstd(axis_data)    # Std for the current channel
         signals[:, i, :, 0] = (axis_data - mean) / (std + 1e-8)  # Normalize and avoid division by zero
+    # # Normalize each axis (channel) independently
+    # for i in range(num_channels):
+    #     axis_data = signals[:, i, :, 0]  # Extract data for channel i (shape: num_samples, sequence_length)
+    #     mean = np.nanmean(axis_data, axis=1, keepdims=True)  # Mean per sample for the current channel
+    #     std = np.nanstd(axis_data, axis=1, keepdims=True)    # Std per sample for the current channel
+    #     signals[:, i, :, 0] = (axis_data - mean) / (std + 1e-8)  # Normalize and avoid division by zero
 
 
 
