@@ -158,6 +158,7 @@ def extract_signal_data():
 
     # Fixed sequence length
     fixed_sequence_length = 2*1024
+    start_index = 1000 
 
     # Lists to store the accelerometer signal data and labels for all samples
     signals = []
@@ -169,9 +170,12 @@ def extract_signal_data():
         acce_df = pd.read_csv(row['acce'], sep=" ", header=None, names=['x', 'y', 'z'], skiprows=1)
 
         # Extract accelerometer data for x, y, z axes
-        acce_data_x = acce_df['x'].values  # Acceleration 'x' data
-        acce_data_y = acce_df['y'].values  # Acceleration 'y' data
-        acce_data_z = acce_df['z'].values  # Acceleration 'z' data
+        # acce_data_x = acce_df['x'].values  # Acceleration 'x' data
+        # acce_data_y = acce_df['y'].values  # Acceleration 'y' data
+        # acce_data_z = acce_df['z'].values  # Acceleration 'z' data
+        acce_data_x = acce_df['x'].values[start_index:]  # Acceleration 'x' data
+        acce_data_y = acce_df['y'].values[start_index:]  # Acceleration 'y' data
+        acce_data_z = acce_df['z'].values[start_index:] 
 
         # Truncate or pad sequences to the fixed length of 2*1024
         acce_data_x = acce_data_x[:fixed_sequence_length] if len(acce_data_x) > fixed_sequence_length else np.pad(
