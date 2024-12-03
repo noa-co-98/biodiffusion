@@ -158,7 +158,7 @@ def extract_signal_data():
 
     # Fixed sequence length
     fixed_sequence_length = 2*1024
-    start_index = 1000 
+    start_index = 1500 
 
     # Lists to store the accelerometer signal data and labels for all samples
     signals = []
