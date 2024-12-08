@@ -155,10 +155,10 @@ def extract_signal_data():
                                        aggfunc='first'). \
         reset_index(). \
         dropna(axis=1)  # remove mostly empty columns
-
-    # Fixed sequence length
-    fixed_sequence_length = 2*1024
-    start_index = 1500 
+      # Sliding window parameters
+    window_size = 400  # 2 seconds of data at 200 Hz
+    step_size = window_size // 2  # 50% overlap
+    start_limit = 1500  # Minimum starting index for the sliding window
 
     # Lists to store the accelerometer signal data and labels for all samples
     signals = []
@@ -170,44 +170,46 @@ def extract_signal_data():
         acce_df = pd.read_csv(row['acce'], sep=" ", header=None, names=['x', 'y', 'z'], skiprows=1)
 
         # Extract accelerometer data for x, y, z axes
-        # acce_data_x = acce_df['x'].values  # Acceleration 'x' data
-        # acce_data_y = acce_df['y'].values  # Acceleration 'y' data
-        # acce_data_z = acce_df['z'].values  # Acceleration 'z' data
-        acce_data_x = acce_df['x'].values[start_index:]  # Acceleration 'x' data
-        acce_data_y = acce_df['y'].values[start_index:]  # Acceleration 'y' data
-        acce_data_z = acce_df['z'].values[start_index:] 
+        acce_data_x = acce_df['x'].values  # Acceleration 'x' data
+        acce_data_y = acce_df['y'].values  # Acceleration 'y' data
+        acce_data_z = acce_df['z'].values  # Acceleration 'z' data
 
-        # Truncate or pad sequences to the fixed length of 2*1024
-        acce_data_x = acce_data_x[:fixed_sequence_length] if len(acce_data_x) > fixed_sequence_length else np.pad(
-            acce_data_x, (0, fixed_sequence_length - len(acce_data_x)), 'constant')
-        acce_data_y = acce_data_y[:fixed_sequence_length] if len(acce_data_y) > fixed_sequence_length else np.pad(
-            acce_data_y, (0, fixed_sequence_length - len(acce_data_y)), 'constant')
-        acce_data_z = acce_data_z[:fixed_sequence_length] if len(acce_data_z) > fixed_sequence_length else np.pad(
-            acce_data_z, (0, fixed_sequence_length - len(acce_data_z)), 'constant')
+        # Stack accelerometer data into a single array (shape: (num_samples, num_channels))
+        acce_data = np.stack([acce_data_x, acce_data_y, acce_data_z], axis=1)  # Shape: (num_samples, 3)
 
-        # Stack the accelerometer data to form a sample with shape (num_channels, sequence_length)
-        sample_data = np.stack([acce_data_x, acce_data_y, acce_data_z], axis=0)  # Shape: (3, 256)
+        # Ensure the signal starts from at least index 1500
+        acce_data = acce_data[start_limit:]  # Shape: (remaining_samples, 3)
+        num_samples = len(acce_data)
 
-        # Append the sample data to the signals list
-        signals.append(sample_data)
+        # Apply sliding window to the accelerometer data
+        for start_idx in range(0, num_samples - window_size + 1, step_size):
+            end_idx = start_idx + window_size
+            window = acce_data[start_idx:end_idx]  # Shape: (window_size, 3)
 
-        # Append the corresponding label to the labels list
-        labels.append(row['activity'])
+            # Transpose to match (num_channels, sequence_length)
+            window = window.T  # Shape: (3, window_size)
+            
+            # Append the window data to the signals list
+            signals.append(window)
 
-    # Convert the signals list to a numpy array with shape (num_samples, num_channels, fixed_sequence_length)
+            # Append the corresponding label to the labels list
+            labels.append(row['activity'])
+
+    # Convert the signals list to a numpy array with shape (num_samples, num_channels, window_size)
     signals_array = np.array(signals)
     print(signals_array)
     print(signals_array.shape)
-    signals_array = np.expand_dims(signals_array, axis=-1)
+    signals_array = np.expand_dims(signals_array, axis=-1)  # Add a channel dimension for models expecting 4D input
     print(signals_array)
     print(signals_array.shape)
+
     # Convert the labels list to a numpy array with shape (num_samples,)
     labels_array = np.array(labels)
     labels_array = np.array([label_mapping[label] for label in labels_array])
     print(labels_array)
     print(labels_array.shape)
-    return signals_array, labels_array
 
+    return signals_array, labels_array
 
 def get_data(args):
 
