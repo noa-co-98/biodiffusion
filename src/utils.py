@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from sklearn.preprocessing import StandardScaler
 
-BASE_DIR =  Path('/content/data_publish_v2') / 'data_publish_v2'
 label_mapping = {
     'bag1': 0, 'bag2': 0, 'bag_low2': 0, 'bag_low3': 0, 'bag_normal1': 0,
     'bag_normal2': 0, 'bag_side1': 0, 'bag_speed1': 0, 'bag_speed2': 0,
@@ -33,31 +32,14 @@ label_mapping = {
     'leg_new2': 3, 'lopata1': 4
 }
 
-def set_seed(s, reproducible=False):
-    "Set random seed for `random`, `torch`, and `numpy` (where available)"
-    try: torch.manual_seed(s)
-    except NameError: pass
-    try: torch.cuda.manual_seed_all(s)
-    except NameError: pass
-    try: np.random.seed(s%(2**32-1))
-    except NameError: pass
-    random.seed(s)
-    if reproducible:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-def untar_data(url, force_download=False, base='./datasets'):
-    d = FastDownload(base=base)
-    return d.get(url, force=force_download, extract_key='data')
-
-
 class MultiChannelSignalDataset(Dataset):
     def __init__(self, signals, labels=None, transform=None):
         """
+        Dataset for multi-channel sensor signals.
         Args:
-            signals (np.array): Numpy array of shape (num_samples, num_channels, sequence_length).
-            labels (np.array, optional): Numpy array of shape (num_samples,) containing labels.
-            transform (callable, optional): Optional transform to be applied on a sample.
+            signals (np.array): Array of shape (num_samples, num_channels, seq_length, 1).
+            labels (np.array, optional): Array of labels for each sample.
+            transform (callable, optional): Optional transform to apply.
         """
         self.signals = signals
         self.labels = labels
@@ -69,18 +51,15 @@ class MultiChannelSignalDataset(Dataset):
     def __getitem__(self, idx):
         signal = self.signals[idx]
         label = self.labels[idx] if self.labels is not None else None
-
-        sample = {'signal': torch.tensor(signal, dtype=torch.float32), 'label': torch.tensor(label, dtype=torch.long) if label is not None else None}
-
+        sample = {'signal': torch.tensor(signal, dtype=torch.float32),
+                  'label': torch.tensor(label, dtype=torch.long) if label is not None else None}
         if self.transform:
             sample = self.transform(sample)
-
         return sample
 
 def extract_signal_data():
+    BASE_DIR = Path('/content/data_publish_v2') / 'data_publish_v2'
     all_files_df = pd.DataFrame({'path': list(BASE_DIR.glob('*/*.txt'))})
-    print(all_files_df.shape)
-    print(all_files_df.head())
     all_files_df['exp_code'] = all_files_df['path'].map(lambda x: x.parent.stem)
     all_files_df['activity'] = all_files_df['exp_code'].map(lambda x: '_'.join(x.split('_')[1:]))
     all_files_df['person'] = all_files_df['exp_code'].map(lambda x: x.split('_')[0])
@@ -89,108 +68,73 @@ def extract_signal_data():
     data_df = all_files_df.pivot_table(values='path',
                                        columns='data_src',
                                        index=['activity', 'person'],
-                                       aggfunc='first'). \
-        reset_index(). \
-        dropna(axis=1)  # remove mostly empty columns
-      # Sliding window parameters
-    window_size = 400  # 2 seconds of data at 200 Hz
-    step_size = window_size // 2  # 50% overlap
-    start_limit = 1500  # Minimum starting index for the sliding window
+                                       aggfunc='first').reset_index().dropna(axis=1)
 
-    # Lists to store the accelerometer signal data and labels for all samples
+    # Sliding window parameters
+    window_size = 400      # e.g., 2 seconds at 200 Hz
+    step_size = window_size // 2  # 50% overlap
+    start_limit = 1500     # Minimum starting index
+
     signals = []
     labels = []
 
-    # Iterate over rows in the data_df
     for index, row in data_df.iterrows():
-        # Read accelerometer data
-        acce_df = pd.read_csv(row['acce'], sep=" ", header=None, names=['x', 'y', 'z'], skiprows=1)
-
-        # Extract accelerometer data for x, y, z axes
-        acce_data_x = acce_df['x'].values  # Acceleration 'x' data
-        acce_data_y = acce_df['y'].values  # Acceleration 'y' data
-        acce_data_z = acce_df['z'].values  # Acceleration 'z' data
-
-        # Stack accelerometer data into a single array (shape: (num_samples, num_channels))
-        acce_data = np.stack([acce_data_x, acce_data_y, acce_data_z], axis=1)  # Shape: (num_samples, 3)
-
-        # Ensure the signal starts from at least index 1500
-        acce_data = acce_data[start_limit:]  # Shape: (remaining_samples, 3)
+        acce_df = pd.read_csv(row['acce'], sep=" ", header=None,
+                              names=['x', 'y', 'z'], skiprows=1)
+        acce_data = np.stack([acce_df['x'].values, acce_df['y'].values, acce_df['z'].values], axis=1)
+        acce_data = acce_data[start_limit:]
         num_samples = len(acce_data)
-
-        # Apply sliding window to the accelerometer data
         for start_idx in range(0, num_samples - window_size + 1, step_size):
-            end_idx = start_idx + window_size
-            window = acce_data[start_idx:end_idx]  # Shape: (window_size, 3)
-
-            # Transpose to match (num_channels, sequence_length)
-            window = window.T  # Shape: (3, window_size)
-            
-            # Append the window data to the signals list
+            window = acce_data[start_idx:start_idx+window_size].T  # Shape: (3, window_size)
             signals.append(window)
-
-            # Append the corresponding label to the labels list
             labels.append(row['activity'])
 
-    # Convert the signals list to a numpy array with shape (num_samples, num_channels, window_size)
     signals_array = np.array(signals)
-    print(signals_array)
-    print(signals_array.shape)
-    signals_array = np.expand_dims(signals_array, axis=-1)  # Add a channel dimension for models expecting 4D input
-    print(signals_array)
-    print(signals_array.shape)
-
-    # Convert the labels list to a numpy array with shape (num_samples,)
-    labels_array = np.array(labels)
-    labels_array = np.array([label_mapping[label] for label in labels_array])
-    print(labels_array)
-    print(labels_array.shape)
-
+    # Expand dims to add a spatial dimension (height=1) for 2D convolutions
+    signals_array = np.expand_dims(signals_array, axis=-1)
+    labels_array = np.array([label_mapping[label] for label in labels])
     return signals_array, labels_array
 
 def get_data(args):
-
     signals, labels = extract_signal_data()
-
-    # Normalize each axis of the 3D signals independently (axis-wise normalization)
-    # Assuming signals have the shape (num_samples, num_channels, sequence_length, 1)
+    # Normalize each channel independently
     num_samples, num_channels, sequence_length, _ = signals.shape
-    
-    means = np.zeros(num_channels)
-    stds = np.zeros(num_channels)
-    # Normalize each axis (channel) independently
+    # Lists to store the per-channel means and stds
+    channel_means = []
+    channel_stds = []
+
     for i in range(num_channels):
-        axis_data = signals[:, i, :, 0]  # Extract data for channel i (shape: num_samples, sequence_length)
-        # mean = np.nanmean(axis_data, axis=1, keepdims=True)  # Mean per sample for the current channel
-        # std = np.nanstd(axis_data, axis=1, keepdims=True)    # Std per sample for the current channel
-        mean = np.nanmean(axis_data)  # Mean for the current channel
-        std = np.nanstd(axis_data)    # Std for the current channel
-        signals[:, i, :, 0] = (axis_data - mean) / (std + 1e-8)  # Normalize and avoid division by zero
-    # # Normalize each axis (channel) independently
-    # for i in range(num_channels):
-    #     axis_data = signals[:, i, :, 0]  # Extract data for channel i (shape: num_samples, sequence_length)
-    #     mean = np.nanmean(axis_data, axis=1, keepdims=True)  # Mean per sample for the current channel
-    #     std = np.nanstd(axis_data, axis=1, keepdims=True)    # Std per sample for the current channel
-    #     signals[:, i, :, 0] = (axis_data - mean) / (std + 1e-8)  # Normalize and avoid division by zero
+        # Extract data for channel i (shape: [num_samples, sequence_length])
+        axis_data = signals[:, i, :, 0]
+        mean = np.nanmean(axis_data)
+        std = np.nanstd(axis_data)
+        channel_means.append(mean)
+        channel_stds.append(std)
+        
+        # Normalize each channel: (data - mean) / (std + epsilon)
+        signals[:, i, :, 0] = (axis_data - mean) / (std + 1e-8)
 
-
+    # Save channel_means and channel_stds (e.g., as part of your model or config)
+    print("Channel Means:", channel_means)
+    print("Channel Stds:", channel_stds)
 
     signal_dataset = MultiChannelSignalDataset(signals=signals, labels=labels)
-    #print(signal_dataset)
-    #print("check 1")
-    #print(signal_dataset.__getitem__)
     train_size = int(0.8 * len(signal_dataset))
     val_size = len(signal_dataset) - train_size
-
-    # Split the dataset
     train_dataset, val_dataset = random_split(signal_dataset, [train_size, val_size])
-    # Create a DataLoader
-    print(train_dataset)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    val_dataloader = DataLoader(val_dataset, batch_size=2*args.batch_size, shuffle=False, num_workers=4)
-    print(train_dataloader)
+    val_dataloader = DataLoader(val_dataset, batch_size=2 * args.batch_size, shuffle=False, num_workers=4)
     return train_dataloader, val_dataloader
 
+def set_seed(s, reproducible=False):
+    """Set random seed for reproducibility."""
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
+    np.random.seed(s % (2**32-1))
+    random.seed(s)
+    if reproducible:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def mk_folders(run_name):
     os.makedirs("models", exist_ok=True)
